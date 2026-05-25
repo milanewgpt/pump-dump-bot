@@ -1,0 +1,18 @@
+[Unit]
+Description=Pump Dump Signal Bot (BingX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gpt
+WorkingDirectory=/home/gpt/pump-dump-bot
+EnvironmentFile=/home/gpt/pump-dump-bot/.env
+ExecStart=/home/gpt/pump-dump-bot/venv/bin/python main.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
