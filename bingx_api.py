@@ -16,11 +16,17 @@ class BingXAPI:
     async def _get(self, path: str, params: dict = None) -> Optional[dict]:
         url = f"{BASE_URL}{path}"
         try:
-            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with self.session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 data = await resp.json()
-                if data.get("code") == 0:
+                code = data.get("code")
+                if code == 0:
                     return data.get("data")
-                logger.debug(f"API error {path}: code={data.get('code')} msg={data.get('msg')}")
+                if code == 100410:
+                    logger.warning(f"Rate limit (100410): {path} params={params}")
+                else:
+                    logger.debug(f"API error {path}: code={code} msg={data.get('msg')}")
                 return None
         except asyncio.TimeoutError:
             logger.debug(f"Timeout: {path} {params}")
@@ -39,6 +45,15 @@ class BingXAPI:
             for c in data
             if isinstance(c, dict) and c.get("symbol", "").endswith("-USDT")
         ]
+
+    async def get_all_tickers(self) -> list[dict]:
+        """Return 24h ticker for ALL symbols in one request.
+        Fields: symbol, lastPrice, openPrice, priceChangePercent, highPrice, lowPrice, …
+        """
+        data = await self._get("/openApi/swap/v2/quote/ticker")
+        if not data or not isinstance(data, list):
+            return []
+        return [t for t in data if t.get("symbol", "").endswith("-USDT")]
 
     async def get_klines(self, symbol: str, interval: str, limit: int = 30) -> list[dict]:
         """Return list of kline dicts: {open, high, low, close, volume, time}."""

@@ -1,6 +1,14 @@
-"""Core scanner: polls BingX, detects pumps, fires Telegram signals."""
+"""Core scanner: polls BingX, detects pumps, fires Telegram signals.
+
+Architecture (rate-limit-safe):
+  - Every SCAN_INTERVAL: fetch all tickers in ONE request (694 pairs).
+  - Compare lastPrice vs cached 30m candle open.
+  - Cache miss (new candle or first run): fetch klines lazily, in small batches.
+  - Enrichment (RSI/funding/ATH): fetched only when a signal fires.
+"""
 import asyncio
 import logging
+import time
 from typing import Optional
 
 import aiohttp
@@ -12,7 +20,15 @@ from tracker import SignalTracker
 
 logger = logging.getLogger(__name__)
 
-CONCURRENCY = 20   # parallel BingX requests during full scan
+CANDLE_PERIOD_MS = 30 * 60 * 1000      # 30 minutes in milliseconds
+REFRESH_BATCH_SIZE = 15                  # symbols per batch when refreshing cache
+REFRESH_BATCH_DELAY = 1.5               # seconds between refresh batches
+
+
+def current_candle_ts() -> int:
+    """Return the open timestamp (ms) of the current 30m candle."""
+    now_ms = int(time.time() * 1000)
+    return (now_ms // CANDLE_PERIOD_MS) * CANDLE_PERIOD_MS
 
 
 class PumpScanner:
@@ -29,6 +45,9 @@ class PumpScanner:
         self.scan_interval = scan_interval
         self.tracker = SignalTracker()
 
+        # symbol -> (candle_open_time_ms, open_price)
+        self._candle_cache: dict[str, tuple[int, float]] = {}
+
     # ------------------------------------------------------------------ #
     #  Main loop
     # ------------------------------------------------------------------ #
@@ -43,70 +62,110 @@ class PumpScanner:
             self.api = BingXAPI(session)
             while True:
                 try:
-                    await self._scan(session)
+                    await self._scan()
                 except Exception as e:
                     logger.error(f"Scan cycle error: {e}", exc_info=True)
                 await asyncio.sleep(self.scan_interval)
 
     # ------------------------------------------------------------------ #
-    #  Scan cycle
+    #  Scan cycle  (1 ticker request + lazy klines refreshes)
     # ------------------------------------------------------------------ #
 
-    async def _scan(self, session: aiohttp.ClientSession):
-        symbols = await self.api.get_all_symbols()
-        if not symbols:
-            logger.warning("Got 0 symbols from BingX — skipping cycle")
+    async def _scan(self):
+        tickers = await self.api.get_all_tickers()
+        if not tickers:
+            logger.warning("Ticker returned 0 items — skipping cycle")
             return
 
-        logger.info(f"Scanning {len(symbols)} symbols…")
-        sem = asyncio.Semaphore(CONCURRENCY)
+        now_candle = current_candle_ts()
+        logger.info(f"Scanning {len(tickers)} symbols via ticker…")
 
-        async def check(sym):
-            async with sem:
-                return await self._check_symbol(sym)
+        stale: list[str] = []   # symbols needing a cache refresh
+        candidates: list[tuple[str, float]] = []  # (symbol, last_price) to check
 
-        results = await asyncio.gather(*[check(s) for s in symbols], return_exceptions=True)
-        sent = sum(1 for r in results if r is True)
+        for t in tickers:
+            sym = t.get("symbol", "")
+            try:
+                last_price = float(t["lastPrice"])
+            except (KeyError, ValueError, TypeError):
+                continue
+
+            cached = self._candle_cache.get(sym)
+            if cached is None or cached[0] < now_candle:
+                stale.append(sym)
+            else:
+                candidates.append((sym, last_price))
+
+        # Refresh stale cache entries (new candle or first run) in batches
+        if stale:
+            logger.info(f"Refreshing cache for {len(stale)} symbol(s)…")
+            refreshed = await self._refresh_cache(stale)
+            logger.info(f"Cache refreshed: {refreshed}/{len(stale)}")
+            # After refresh, add newly cached symbols to candidates
+            for t in tickers:
+                sym = t.get("symbol", "")
+                if sym in stale and sym in self._candle_cache:
+                    try:
+                        candidates.append((sym, float(t["lastPrice"])))
+                    except (ValueError, TypeError):
+                        pass
+
+        # Check candidates against cached opens
+        sent = 0
+        for sym, last_price in candidates:
+            cached = self._candle_cache.get(sym)
+            if not cached:
+                continue
+            candle_time, open_price = cached
+            if open_price == 0:
+                continue
+
+            pct = (last_price - open_price) / open_price * 100
+            if pct < self.min_pump_pct:
+                continue
+            if self.tracker.is_duplicate(sym, candle_time):
+                continue
+
+            logger.info(f"🔥 Pump detected: {sym} +{pct:.2f}%")
+            await self._send_signal(sym, pct, open_price, last_price, candle_time)
+            sent += 1
+
         if sent:
             logger.info(f"✅ Sent {sent} signal(s) this cycle")
 
     # ------------------------------------------------------------------ #
-    #  Per-symbol check
+    #  Cache refresh
     # ------------------------------------------------------------------ #
 
-    async def _check_symbol(self, symbol: str) -> bool:
-        # --- 1. Get last two 30m candles (index -1 = current/live) ---
-        klines = await self.api.get_klines(symbol, "30m", limit=2)
+    async def _refresh_cache(self, symbols: list[str]) -> int:
+        """Fetch 30m klines for each symbol and update cache. Returns count refreshed."""
+        count = 0
+        for i in range(0, len(symbols), REFRESH_BATCH_SIZE):
+            batch = symbols[i : i + REFRESH_BATCH_SIZE]
+            results = await asyncio.gather(
+                *[self._fetch_candle_open(sym) for sym in batch],
+                return_exceptions=True,
+            )
+            for sym, res in zip(batch, results):
+                if isinstance(res, tuple):
+                    self._candle_cache[sym] = res
+                    count += 1
+            if i + REFRESH_BATCH_SIZE < len(symbols):
+                await asyncio.sleep(REFRESH_BATCH_DELAY)
+        return count
+
+    async def _fetch_candle_open(self, symbol: str) -> Optional[tuple[int, float]]:
+        klines = await self.api.get_klines(symbol, "30m", limit=1)
         if not klines:
-            return False
-
-        candle = klines[-1]
+            return None
         try:
-            open_p = float(candle["open"])
-            close_p = float(candle["close"])
-            candle_time = int(candle["time"])
+            k = klines[-1]
+            return (int(k["time"]), float(k["open"]))
         except (KeyError, ValueError, TypeError):
-            return False
-
-        if open_p == 0:
-            return False
-
-        pct = (close_p - open_p) / open_p * 100
-
-        if pct < self.min_pump_pct:
-            return False
-
-        # --- 2. Dedup: one signal per (symbol, candle_open_time) ---
-        if self.tracker.is_duplicate(symbol, candle_time):
-            return False
-
-        # --- 3. Enrich & send ---
-        logger.info(f"🔥 Pump detected: {symbol} +{pct:.2f}%")
-        await self._send_signal(symbol, pct, open_p, close_p, candle_time)
-        return True
+            return None
 
     # ------------------------------------------------------------------ #
-    #  Enrich & format
+    #  Enrich & send signal
     # ------------------------------------------------------------------ #
 
     async def _send_signal(
@@ -117,7 +176,6 @@ class PumpScanner:
         close_p: float,
         candle_time: int,
     ):
-        # Fetch enrichment data concurrently
         rsi_1h, rsi_4h, rsi_1d, funding, ath_x = await asyncio.gather(
             self._get_rsi(symbol, "1h"),
             self._get_rsi(symbol, "4h"),
@@ -127,7 +185,6 @@ class PumpScanner:
             return_exceptions=True,
         )
 
-        # Replace exceptions with None / default
         rsi_1h = rsi_1h if isinstance(rsi_1h, float) else None
         rsi_4h = rsi_4h if isinstance(rsi_4h, float) else None
         rsi_1d = rsi_1d if isinstance(rsi_1d, float) else None
@@ -148,7 +205,6 @@ class PumpScanner:
             signal_per_day=daily_count,
             ath_x=ath_x,
         )
-
         await self._send_telegram(msg)
 
     # ------------------------------------------------------------------ #
@@ -166,7 +222,6 @@ class PumpScanner:
             return None
 
     async def _get_ath_x(self, symbol: str, current_price: float) -> float:
-        """Return ath / current_price (approximate ATH from last 200 daily candles)."""
         klines = await self.api.get_klines(symbol, "1d", limit=200)
         if not klines or current_price == 0:
             return 0.0
@@ -186,7 +241,9 @@ class PumpScanner:
         }
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with s.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     if resp.status != 200:
                         body = await resp.text()
                         logger.error(f"Telegram error {resp.status}: {body}")
