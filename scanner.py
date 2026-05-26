@@ -37,12 +37,14 @@ class PumpScanner:
         telegram_token: str,
         chat_id: str,
         min_pump_pct: float = 11.0,
-        scan_interval: int = 60,
+        scan_interval: int = 30,
+        min_volume_usdt: float = 1_000_000,
     ):
         self.telegram_token = telegram_token
         self.chat_id = chat_id
         self.min_pump_pct = min_pump_pct
         self.scan_interval = scan_interval
+        self.min_volume_usdt = min_volume_usdt
         self.tracker = SignalTracker()
 
         # symbol -> (candle_open_time_ms, open_price)
@@ -55,7 +57,7 @@ class PumpScanner:
     async def run(self):
         logger.info(
             f"PumpScanner started | threshold={self.min_pump_pct}% | "
-            f"interval={self.scan_interval}s"
+            f"interval={self.scan_interval}s | min_volume={self.min_volume_usdt:,.0f} USDT"
         )
         connector = aiohttp.TCPConnector(limit=50)
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -95,16 +97,23 @@ class PumpScanner:
             # Re-fetch ticker so we check FRESH prices after cache is updated
             tickers = await self.api.get_all_tickers() or tickers
 
-        # Build candidates from current (fresh) ticker
+        # Build candidates: cache must exist + volume filter
         candidates: list[tuple[str, float]] = []
+        skipped_vol = 0
         for t in tickers:
             sym = t.get("symbol", "")
             if sym not in self._candle_cache:
                 continue  # cache still missing (rate-limited) — skip this cycle
             try:
+                vol = float(t.get("quoteVolume", 0))
+                if vol < self.min_volume_usdt:
+                    skipped_vol += 1
+                    continue
                 candidates.append((sym, float(t["lastPrice"])))
             except (ValueError, TypeError):
                 pass
+        if skipped_vol:
+            logger.debug(f"Skipped {skipped_vol} low-volume symbols (<{self.min_volume_usdt:,.0f} USDT)")
 
         # Check candidates against cached opens
         sent = 0
