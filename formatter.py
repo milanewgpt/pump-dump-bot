@@ -15,7 +15,7 @@ def _fmt_price(p: float) -> str:
 
 
 def _fmt_rsi(v: Optional[float]) -> str:
-    return f"{v:.2f}" if v is not None else "—"
+    return str(round(v)) if v is not None else "—"
 
 
 def _fmt_funding(v: Optional[float]) -> str:

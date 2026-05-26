@@ -80,35 +80,31 @@ class PumpScanner:
         now_candle = current_candle_ts()
         logger.info(f"Scanning {len(tickers)} symbols via ticker…")
 
-        stale: list[str] = []   # symbols needing a cache refresh
-        candidates: list[tuple[str, float]] = []  # (symbol, last_price) to check
-
+        stale: list[str] = []
         for t in tickers:
             sym = t.get("symbol", "")
-            try:
-                last_price = float(t["lastPrice"])
-            except (KeyError, ValueError, TypeError):
-                continue
-
             cached = self._candle_cache.get(sym)
             if cached is None or cached[0] < now_candle:
                 stale.append(sym)
-            else:
-                candidates.append((sym, last_price))
 
-        # Refresh stale cache entries (new candle or first run) in batches
+        # Refresh stale cache entries, then re-fetch fresh ticker prices
         if stale:
             logger.info(f"Refreshing cache for {len(stale)} symbol(s)…")
             refreshed = await self._refresh_cache(stale)
             logger.info(f"Cache refreshed: {refreshed}/{len(stale)}")
-            # After refresh, add newly cached symbols to candidates
-            for t in tickers:
-                sym = t.get("symbol", "")
-                if sym in stale and sym in self._candle_cache:
-                    try:
-                        candidates.append((sym, float(t["lastPrice"])))
-                    except (ValueError, TypeError):
-                        pass
+            # Re-fetch ticker so we check FRESH prices after cache is updated
+            tickers = await self.api.get_all_tickers() or tickers
+
+        # Build candidates from current (fresh) ticker
+        candidates: list[tuple[str, float]] = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if sym not in self._candle_cache:
+                continue  # cache still missing (rate-limited) — skip this cycle
+            try:
+                candidates.append((sym, float(t["lastPrice"])))
+            except (ValueError, TypeError):
+                pass
 
         # Check candidates against cached opens
         sent = 0
@@ -212,7 +208,8 @@ class PumpScanner:
     # ------------------------------------------------------------------ #
 
     async def _get_rsi(self, symbol: str, interval: str) -> Optional[float]:
-        klines = await self.api.get_klines(symbol, interval, limit=30)
+        # 100 candles → RSI fully warmed up (Wilder's needs ~50+ to stabilise)
+        klines = await self.api.get_klines(symbol, interval, limit=100)
         if not klines:
             return None
         try:
