@@ -196,6 +196,12 @@ class PumpScanner:
         funding = funding if isinstance(funding, float) else None
         ath_x = ath_x if isinstance(ath_x, float) else 0.0
 
+        # ATH filter: skip coins too far from their ATH (noisy low-cap junk)
+        ATH_MAX_X = 50
+        if ath_x > ATH_MAX_X:
+            logger.info(f"⏭️  Skipping {symbol}: {ath_x:.0f}x to ATH > {ATH_MAX_X}x threshold")
+            return
+
         daily_count = self.tracker.mark_sent(symbol, candle_time)
 
         msg = format_pump_signal(
