@@ -97,7 +97,7 @@ class PumpScanner:
             # Re-fetch ticker so we check FRESH prices after cache is updated
             tickers = await self.api.get_all_tickers() or tickers
 
-        # Build candidates: cache must exist + volume filter
+        # Build candidates: cache must exist + volume + min price filters
         candidates: list[tuple[str, float]] = []
         skipped_vol = 0
         for t in tickers:
@@ -108,8 +108,12 @@ class PumpScanner:
                 vol = float(t.get("quoteVolume", 0))
                 if vol < self.min_volume_usdt:
                     skipped_vol += 1
+                    logger.debug(f"Vol skip: {sym} = {vol:,.0f} USDT")
                     continue
-                candidates.append((sym, float(t["lastPrice"])))
+                last_price = float(t["lastPrice"])
+                if last_price < 0.001:
+                    continue
+                candidates.append((sym, last_price))
             except (ValueError, TypeError):
                 pass
         if skipped_vol:
@@ -195,12 +199,6 @@ class PumpScanner:
         rsi_1d = rsi_1d if isinstance(rsi_1d, float) else None
         funding = funding if isinstance(funding, float) else None
         ath_x = ath_x if isinstance(ath_x, float) else 0.0
-
-        # ATH filter: skip coins too far from their ATH (noisy low-cap junk)
-        ATH_MAX_X = 50
-        if ath_x > ATH_MAX_X:
-            logger.info(f"⏭️  Skipping {symbol}: {ath_x:.0f}x to ATH > {ATH_MAX_X}x threshold")
-            return
 
         daily_count = self.tracker.mark_sent(symbol, candle_time)
 
