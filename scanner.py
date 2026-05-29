@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 CANDLE_PERIOD_MS = 30 * 60 * 1000      # 30 minutes in milliseconds
 REFRESH_BATCH_SIZE = 15                  # symbols per batch when refreshing cache
-REFRESH_BATCH_DELAY = 1.5               # seconds between refresh batches
+REFRESH_BATCH_DELAY = 1.0               # seconds between refresh batches
 
 
 def current_candle_ts() -> int:
@@ -82,12 +82,24 @@ class PumpScanner:
         now_candle = current_candle_ts()
         logger.info(f"Scanning {len(tickers)} symbols via ticker…")
 
+        # Build volume lookup for sorting stale symbols (high-volume first)
+        vol_by_sym: dict[str, float] = {}
+        for t in tickers:
+            sym = t.get("symbol", "")
+            try:
+                vol_by_sym[sym] = float(t.get("quoteVolume", 0))
+            except (ValueError, TypeError):
+                vol_by_sym[sym] = 0.0
+
         stale: list[str] = []
         for t in tickers:
             sym = t.get("symbol", "")
             cached = self._candle_cache.get(sym)
             if cached is None or cached[0] < now_candle:
                 stale.append(sym)
+
+        # Sort stale by volume descending — high-volume coins refreshed first
+        stale.sort(key=lambda s: vol_by_sym.get(s, 0), reverse=True)
 
         # Refresh stale cache entries, then re-fetch fresh ticker prices
         if stale:
