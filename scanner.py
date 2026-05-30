@@ -37,7 +37,7 @@ class PumpScanner:
         telegram_token: str,
         chat_id: str,
         min_pump_pct: float = 11.0,
-        scan_interval: int = 30,
+        scan_interval: int = 10,
         min_volume_usdt: float = 1_000_000,
     ):
         self.telegram_token = telegram_token
@@ -49,6 +49,8 @@ class PumpScanner:
 
         # symbol -> (candle_open_time_ms, open_price)
         self._candle_cache: dict[str, tuple[int, float]] = {}
+        # symbols present in the previous bulk ticker response (for dropout detection)
+        self._last_ticker_syms: set[str] = set()
 
     # ------------------------------------------------------------------ #
     #  Main loop
@@ -108,6 +110,23 @@ class PumpScanner:
             logger.info(f"Cache refreshed: {refreshed}/{len(stale)}")
             # Re-fetch ticker so we check FRESH prices after cache is updated
             tickers = await self.api.get_all_tickers() or tickers
+
+        # Fetch individually any cached symbols that dropped out of bulk ticker
+        ticker_syms = {t.get("symbol", "") for t in tickers}
+        missing = [
+            s for s in self._last_ticker_syms
+            if s not in ticker_syms and s in self._candle_cache
+        ][:5]
+        self._last_ticker_syms = ticker_syms
+        if missing:
+            logger.debug(f"Missing from bulk ticker, fetching individually: {missing}")
+            extras = await asyncio.gather(
+                *[self.api.get_ticker(s) for s in missing],
+                return_exceptions=True,
+            )
+            for item in extras:
+                if isinstance(item, dict) and item.get("symbol"):
+                    tickers.append(item)
 
         # Build candidates: cache must exist + volume + min price filters
         candidates: list[tuple[str, float]] = []

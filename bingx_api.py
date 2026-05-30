@@ -65,6 +65,15 @@ class BingXAPI:
             return []
         return data
 
+    async def get_ticker(self, symbol: str) -> Optional[dict]:
+        """Fetch ticker for a single symbol (fallback when missing from bulk response)."""
+        data = await self._get("/openApi/swap/v2/quote/ticker", params={"symbol": symbol})
+        if isinstance(data, list):
+            return data[0] if data else None
+        if isinstance(data, dict) and data.get("symbol"):
+            return data
+        return None
+
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         """Return current funding rate as float (e.g. 0.0001 = 0.01%)."""
         data = await self._get(
