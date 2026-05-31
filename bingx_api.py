@@ -55,12 +55,14 @@ class BingXAPI:
             return []
         return [t for t in data if t.get("symbol", "").endswith("-USDT")]
 
-    async def get_klines(self, symbol: str, interval: str, limit: int = 30) -> list[dict]:
+    async def get_klines(
+        self, symbol: str, interval: str, limit: int = 30, start_time: int = None
+    ) -> list[dict]:
         """Return list of kline dicts: {open, high, low, close, volume, time}."""
-        data = await self._get(
-            "/openApi/swap/v3/quote/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-        )
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = start_time
+        data = await self._get("/openApi/swap/v3/quote/klines", params=params)
         if not data or not isinstance(data, list):
             return []
         return data

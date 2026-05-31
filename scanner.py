@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 CANDLE_PERIOD_MS = 30 * 60 * 1000      # 30 minutes in milliseconds
 REFRESH_BATCH_SIZE = 15                  # symbols per batch when refreshing cache
 REFRESH_BATCH_DELAY = 1.0               # seconds between refresh batches
+MAX_STALE_PER_CYCLE = 50                # cap stale refresh per cycle (reduces blind window from 66s→~8s)
 
 
 def current_candle_ts() -> int:
@@ -51,6 +52,8 @@ class PumpScanner:
         self._candle_cache: dict[str, tuple[int, float]] = {}
         # symbols present in the previous bulk ticker response (for dropout detection)
         self._last_ticker_syms: set[str] = set()
+        # symbols currently absent from bulk ticker (fetched individually every cycle)
+        self._absent_syms: set[str] = set()
 
     # ------------------------------------------------------------------ #
     #  Main loop
@@ -103,6 +106,12 @@ class PumpScanner:
         # Sort stale by volume descending — high-volume coins refreshed first
         stale.sort(key=lambda s: vol_by_sym.get(s, 0), reverse=True)
 
+        # Cap per-cycle refresh to avoid long blind windows at candle boundaries
+        # (top MAX_STALE_PER_CYCLE by volume; remainder picked up in subsequent cycles)
+        if len(stale) > MAX_STALE_PER_CYCLE:
+            logger.info(f"Refreshing top {MAX_STALE_PER_CYCLE}/{len(stale)} stale symbols by volume")
+            stale = stale[:MAX_STALE_PER_CYCLE]
+
         # Refresh stale cache entries, then re-fetch fresh ticker prices
         if stale:
             logger.info(f"Refreshing cache for {len(stale)} symbol(s)…")
@@ -111,17 +120,18 @@ class PumpScanner:
             # Re-fetch ticker so we check FRESH prices after cache is updated
             tickers = await self.api.get_all_tickers() or tickers
 
-        # Fetch individually any cached symbols that dropped out of bulk ticker
+        # Persistent absent-symbol tracking: keep fetching symbols missing from bulk
+        # ticker every cycle until they return (one-shot was insufficient for slow pumps)
         ticker_syms = {t.get("symbol", "") for t in tickers}
-        missing = [
-            s for s in self._last_ticker_syms
-            if s not in ticker_syms and s in self._candle_cache
-        ][:5]
+        newly_gone = self._last_ticker_syms - ticker_syms
+        self._absent_syms = (self._absent_syms | newly_gone) - ticker_syms
+        self._absent_syms &= set(self._candle_cache.keys())  # only if cache exists
         self._last_ticker_syms = ticker_syms
-        if missing:
-            logger.debug(f"Missing from bulk ticker, fetching individually: {missing}")
+        if self._absent_syms:
+            to_fetch = list(self._absent_syms)[:5]
+            logger.info(f"Fetching {len(to_fetch)} absent symbol(s) individually: {to_fetch}")
             extras = await asyncio.gather(
-                *[self.api.get_ticker(s) for s in missing],
+                *[self.api.get_ticker(s) for s in to_fetch],
                 return_exceptions=True,
             )
             for item in extras:
@@ -195,12 +205,17 @@ class PumpScanner:
         return count
 
     async def _fetch_candle_open(self, symbol: str) -> Optional[tuple[int, float]]:
-        klines = await self.api.get_klines(symbol, "30m", limit=1)
+        # startTime=current candle open ensures we get THIS candle, not the previous closed one
+        klines = await self.api.get_klines(symbol, "30m", limit=1, start_time=current_candle_ts())
         if not klines:
             return None
         try:
             k = klines[-1]
-            return (int(k["time"]), float(k["open"]))
+            ts = int(k["time"])
+            # Reject if BingX returned a candle from a previous period
+            if ts < current_candle_ts():
+                return None
+            return (ts, float(k["open"]))
         except (KeyError, ValueError, TypeError):
             return None
 
