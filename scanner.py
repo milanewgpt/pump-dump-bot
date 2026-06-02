@@ -138,13 +138,19 @@ class PumpScanner:
                 if isinstance(item, dict) and item.get("symbol"):
                     tickers.append(item)
 
-        # Build candidates: cache must exist + volume + min price filters
-        candidates: list[tuple[str, float]] = []
+        # Build candidates: cache must exist, must be current candle, volume + min price filters
+        candidates: list[tuple[str, float, int, float]] = []  # sym, last_price, candle_time, open_price
         skipped_vol = 0
         for t in tickers:
             sym = t.get("symbol", "")
-            if sym not in self._candle_cache:
+            cached = self._candle_cache.get(sym)
+            if not cached:
                 continue  # cache still missing (rate-limited) — skip this cycle
+            candle_time, open_price = cached
+            if candle_time < now_candle:
+                continue  # stale open from previous candle — skip to avoid wrong-candle signals
+            if open_price == 0:
+                continue
             try:
                 vol = float(t.get("quoteVolume", 0))
                 if vol < self.min_volume_usdt:
@@ -154,7 +160,7 @@ class PumpScanner:
                 last_price = float(t["lastPrice"])
                 if last_price < 0.001:
                     continue
-                candidates.append((sym, last_price))
+                candidates.append((sym, last_price, candle_time, open_price))
             except (ValueError, TypeError):
                 pass
         if skipped_vol:
@@ -162,14 +168,7 @@ class PumpScanner:
 
         # Check candidates against cached opens
         sent = 0
-        for sym, last_price in candidates:
-            cached = self._candle_cache.get(sym)
-            if not cached:
-                continue
-            candle_time, open_price = cached
-            if open_price == 0:
-                continue
-
+        for sym, last_price, candle_time, open_price in candidates:
             pct = (last_price - open_price) / open_price * 100
             if pct < self.min_pump_pct:
                 continue
@@ -278,7 +277,7 @@ class PumpScanner:
             return None
 
     async def _get_ath_x(self, symbol: str, current_price: float) -> float:
-        klines = await self.api.get_klines(symbol, "1d", limit=200)
+        klines = await self.api.get_klines(symbol, "1d", limit=1440)
         if not klines or current_price == 0:
             return 0.0
         try:
