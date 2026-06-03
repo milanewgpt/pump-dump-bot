@@ -16,6 +16,7 @@ import aiohttp
 from bingx_api import BingXAPI
 from indicators import calculate_rsi
 from formatter import format_pump_signal
+from short_analyzer import format_short_analysis
 from tracker import SignalTracker
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,7 @@ class PumpScanner:
                     tickers.append(item)
 
         # Build candidates: cache must exist, must be current candle, volume + min price filters
-        candidates: list[tuple[str, float, int, float]] = []  # sym, last_price, candle_time, open_price
+        candidates: list[tuple[str, float, int, float, float]] = []  # sym, last_price, candle_time, open_price, vol_24h
         skipped_vol = 0
         for t in tickers:
             sym = t.get("symbol", "")
@@ -160,7 +161,7 @@ class PumpScanner:
                 last_price = float(t["lastPrice"])
                 if last_price < 0.001:
                     continue
-                candidates.append((sym, last_price, candle_time, open_price))
+                candidates.append((sym, last_price, candle_time, open_price, vol))
             except (ValueError, TypeError):
                 pass
         if skipped_vol:
@@ -168,7 +169,7 @@ class PumpScanner:
 
         # Check candidates against cached opens
         sent = 0
-        for sym, last_price, candle_time, open_price in candidates:
+        for sym, last_price, candle_time, open_price, vol_24h in candidates:
             pct = (last_price - open_price) / open_price * 100
             if pct < self.min_pump_pct:
                 continue
@@ -176,7 +177,7 @@ class PumpScanner:
                 continue
 
             logger.info(f"🔥 Pump detected: {sym} +{pct:.2f}%")
-            await self._send_signal(sym, pct, open_price, last_price, candle_time)
+            await self._send_signal(sym, pct, open_price, last_price, candle_time, vol_24h)
             sent += 1
 
         if sent:
@@ -229,13 +230,16 @@ class PumpScanner:
         open_p: float,
         close_p: float,
         candle_time: int,
+        vol_24h: float = 0.0,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x = await asyncio.gather(
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h = await asyncio.gather(
             self._get_rsi(symbol, "1h"),
             self._get_rsi(symbol, "4h"),
             self._get_rsi(symbol, "1d"),
             self.api.get_funding_rate(symbol),
             self._get_ath_x(symbol, close_p),
+            self._get_vol_multiplier(symbol),
+            self._get_btc_6h_change(),
             return_exceptions=True,
         )
 
@@ -244,6 +248,8 @@ class PumpScanner:
         rsi_1d = rsi_1d if isinstance(rsi_1d, float) else None
         funding = funding if isinstance(funding, float) else None
         ath_x = ath_x if isinstance(ath_x, float) else 0.0
+        vol_mult = vol_mult if isinstance(vol_mult, float) else None
+        btc_6h = btc_6h if isinstance(btc_6h, float) else None
 
         daily_count = self.tracker.mark_sent(symbol, candle_time)
 
@@ -261,9 +267,47 @@ class PumpScanner:
         )
         await self._send_telegram(msg)
 
+        short_msg = format_short_analysis(
+            symbol=symbol,
+            pct=pct,
+            current_price=close_p,
+            rsi_1h=rsi_1h,
+            vol_multiplier=vol_mult,
+            vol_24h=vol_24h,
+            btc_6h_pct=btc_6h,
+            ath_x=ath_x,
+            funding=funding,
+        )
+        await self._send_telegram(short_msg)
+
     # ------------------------------------------------------------------ #
     #  Helpers
     # ------------------------------------------------------------------ #
+
+    async def _get_vol_multiplier(self, symbol: str) -> Optional[float]:
+        """Current 30m candle volume vs average of previous 49 candles."""
+        klines = await self.api.get_klines(symbol, "30m", limit=50)
+        if len(klines) < 2:
+            return None
+        try:
+            current_vol = float(klines[-1].get("volume", 0))
+            hist = klines[:-1]
+            avg_vol = sum(float(k.get("volume", 0)) for k in hist) / len(hist)
+            return current_vol / avg_vol if avg_vol > 0 else None
+        except Exception:
+            return None
+
+    async def _get_btc_6h_change(self) -> Optional[float]:
+        """BTC-USDT price change over last ~6 hours (1h klines)."""
+        klines = await self.api.get_klines("BTC-USDT", "1h", limit=8)
+        if len(klines) < 7:
+            return None
+        try:
+            ref = float(klines[-7]["open"])
+            cur = float(klines[-1]["close"])
+            return (cur - ref) / ref * 100 if ref > 0 else None
+        except Exception:
+            return None
 
     async def _get_rsi(self, symbol: str, interval: str) -> Optional[float]:
         # 100 candles → RSI fully warmed up (Wilder's needs ~50+ to stabilise)
