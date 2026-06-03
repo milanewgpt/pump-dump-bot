@@ -285,14 +285,18 @@ class PumpScanner:
     # ------------------------------------------------------------------ #
 
     async def _get_vol_multiplier(self, symbol: str) -> Optional[float]:
-        """Current 30m candle volume vs average of previous 49 candles."""
+        """Current 30m candle USDT volume vs average of previous 49 candles.
+        Uses volume * close to convert base volume to USDT (price-adjusted comparison).
+        """
         klines = await self.api.get_klines(symbol, "30m", limit=50)
         if len(klines) < 2:
             return None
         try:
-            current_vol = float(klines[-1].get("volume", 0))
+            def usdt_vol(k: dict) -> float:
+                return float(k.get("volume", 0)) * float(k.get("close", 1))
+            current_vol = usdt_vol(klines[-1])
             hist = klines[:-1]
-            avg_vol = sum(float(k.get("volume", 0)) for k in hist) / len(hist)
+            avg_vol = sum(usdt_vol(k) for k in hist) / len(hist)
             return current_vol / avg_vol if avg_vol > 0 else None
         except Exception:
             return None

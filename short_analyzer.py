@@ -68,11 +68,11 @@ def _score_funding(funding: Optional[float]) -> tuple[Optional[str], Optional[st
     if funding is None:
         return None, None, 0.0
     pct = funding * 100
-    if pct < -0.05:
+    if pct < 0:
         return f"Фандинг {pct:.2f}% — отрицательный, перевес шортов", "✅", 1.0
     if pct > 0.05:
         return f"Фандинг {pct:.2f}% — повышенный", "⚠️", -0.5
-    return None, None, 0.0  # neutral — not shown
+    return None, None, 0.0  # neutral (0–0.05%) — not shown
 
 
 def _score_liquidity(vol_24h: float) -> tuple[Optional[str], Optional[str], float]:
