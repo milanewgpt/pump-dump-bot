@@ -233,9 +233,9 @@ class PumpScanner:
         vol_24h: float = 0.0,
     ):
         rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h = await asyncio.gather(
-            self._get_rsi(symbol, "1h"),
-            self._get_rsi(symbol, "4h"),
-            self._get_rsi(symbol, "1d"),
+            self._get_rsi(symbol, "1h", current_price=close_p),
+            self._get_rsi(symbol, "4h", current_price=close_p),
+            self._get_rsi(symbol, "1d", current_price=close_p),
             self.api.get_funding_rate(symbol),
             self._get_ath_x(symbol, close_p),
             self._get_vol_multiplier(symbol),
@@ -312,26 +312,41 @@ class PumpScanner:
     async def _get_btc_6h_change(self) -> Optional[float]:
         """BTC-USDT price change over last ~6 hours.
 
-        Uses 7 completed 1h candles: klines[-6].open ≈ 6h ago,
-        klines[-1].close ≈ current. Previous impl used klines[-7] (limit=8) = ~7h back.
+        Fetches live BTC ticker alongside 7 completed 1h candles.
+        klines[-6].open ≈ 6h ago; live lastPrice = current (avoids up to 59min
+        stale close when BTC reverses near a candle boundary).
         """
-        klines = await self.api.get_klines("BTC-USDT", "1h", limit=7)
-        if len(klines) < 6:
+        klines, ticker = await asyncio.gather(
+            self.api.get_klines("BTC-USDT", "1h", limit=7),
+            self.api.get_ticker("BTC-USDT"),
+            return_exceptions=True,
+        )
+        if not isinstance(klines, list) or len(klines) < 6:
             return None
         try:
             ref = float(klines[-6]["open"])
-            cur = float(klines[-1]["close"])
+            if isinstance(ticker, dict) and ticker.get("lastPrice"):
+                cur = float(ticker["lastPrice"])
+            else:
+                cur = float(klines[-1]["close"])
             return (cur - ref) / ref * 100 if ref > 0 else None
         except Exception:
             return None
 
-    async def _get_rsi(self, symbol: str, interval: str) -> Optional[float]:
-        # 100 candles → RSI fully warmed up (Wilder's needs ~50+ to stabilise)
+    async def _get_rsi(self, symbol: str, interval: str, current_price: Optional[float] = None) -> Optional[float]:
+        """100 completed candles + optionally append current live price.
+
+        BingX returns only completed candles without startTime, so the current
+        candle (which includes the pump) is missing. Appending current_price
+        gives RSI that reflects the live overbought state.
+        """
         klines = await self.api.get_klines(symbol, interval, limit=100)
         if not klines:
             return None
         try:
             closes = [float(k["close"]) for k in klines]
+            if current_price is not None:
+                closes.append(current_price)
             return calculate_rsi(closes)
         except Exception:
             return None
