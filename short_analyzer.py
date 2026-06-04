@@ -1,6 +1,18 @@
 """Post-pump short analysis: scoring criteria and Telegram message formatter."""
 from __future__ import annotations
+import time
 from typing import Optional
+
+# BingX charges funding every 8h at 00:00, 08:00, 16:00 UTC
+_FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
+_FUNDING_WARN_MINUTES = 30   # warn if next funding < 30 min away
+_FUNDING_WARN_PCT = -0.5     # trigger if funding ≤ -0.5% (fraction: -0.005)
+
+
+def _minutes_to_next_funding() -> float:
+    now_ms = int(time.time() * 1000)
+    next_ms = ((now_ms // _FUNDING_INTERVAL_MS) + 1) * _FUNDING_INTERVAL_MS
+    return (next_ms - now_ms) / 60_000
 
 
 def _fmt_price(p: float) -> str:
@@ -135,8 +147,23 @@ def format_short_analysis(
         criteria.append((liq_icon, liq_label))
         total += liq_score
 
-    v_emoji, v_label = _verdict(total)
+    # Check ПОДОЖДАТЬ: large negative funding about to be charged
+    fund_pct = funding * 100 if funding is not None else 0.0
+    mins = _minutes_to_next_funding()
+    wait_mode = fund_pct <= _FUNDING_WARN_PCT and mins < _FUNDING_WARN_MINUTES
+
     coin = symbol.replace("-USDT", "").replace("-USDC", "")
+
+    if wait_mode:
+        v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
+        wait_line = (
+            "❌",
+            f"Крупный отрицательный фандинг {fund_pct:.2f}% начисляется через "
+            f"~{int(mins)} мин — шорт сразу заплатит, лучше подождать",
+        )
+        criteria.insert(0, wait_line)
+    else:
+        v_emoji, v_label = _verdict(total)
 
     msg_lines = [
         f"📌 {coin}/USDT · шорт после пампа +{pct:.2f}%",
@@ -148,7 +175,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    if total >= 0.0:
+    if not wait_mode and total >= 0.0:
         sl = current_price * 1.03
         tp = current_price * 0.95
         msg_lines.extend([
@@ -156,6 +183,12 @@ def format_short_analysis(
             f"🎯 Вход (шорт) около {_fmt_price(current_price)}",
             f"⛔ Стоп-лосс {_fmt_price(sl)} (+3%)",
             f"✅ Цель: 50% на {_fmt_price(tp)} (−5%), стоп в безубыток, остаток трейлингом",
+        ])
+
+    if wait_mode:
+        msg_lines.extend([
+            "",
+            "🕒 Дождитесь начисления фандинга и перепроверьте сигнал",
         ])
 
     return "\n".join(msg_lines)
