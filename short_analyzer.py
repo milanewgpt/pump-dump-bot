@@ -58,7 +58,7 @@ def _score_ath(ath_x: float) -> tuple[str, str, float]:
         return "", "", 0.0
     if ath_x < 1.05:
         return "Новый ATH — сверху нет сопротивления, риск сильного пролёта вверх", "❌", -1.0
-    if ath_x < 1.5:
+    if ath_x < 2.0:
         return "У самого ATH — сопротивления сверху почти нет", "⚠️", -0.5
     return f"До ATH {int(ath_x)}x — сверху есть сопротивление", "✅", 1.0
 

@@ -285,29 +285,41 @@ class PumpScanner:
     # ------------------------------------------------------------------ #
 
     async def _get_vol_multiplier(self, symbol: str) -> Optional[float]:
-        """Current 30m candle USDT volume vs average of previous 49 candles.
-        Uses volume * close to convert base volume to USDT (price-adjusted comparison).
+        """Current 30m candle USDT volume vs average of 50 completed candles.
+
+        Uses startTime to fetch the current OPEN candle (BingX without startTime
+        returns only completed candles, so klines[-1] would be the previous candle).
+        USDT volume = volume * close for price-adjusted comparison.
         """
-        klines = await self.api.get_klines(symbol, "30m", limit=50)
-        if len(klines) < 2:
+        curr_klines, hist_klines = await asyncio.gather(
+            self.api.get_klines(symbol, "30m", limit=1, start_time=current_candle_ts()),
+            self.api.get_klines(symbol, "30m", limit=50),
+            return_exceptions=True,
+        )
+        if not isinstance(curr_klines, list) or not curr_klines:
+            return None
+        if not isinstance(hist_klines, list) or not hist_klines:
             return None
         try:
             def usdt_vol(k: dict) -> float:
                 return float(k.get("volume", 0)) * float(k.get("close", 1))
-            current_vol = usdt_vol(klines[-1])
-            hist = klines[:-1]
-            avg_vol = sum(usdt_vol(k) for k in hist) / len(hist)
+            current_vol = usdt_vol(curr_klines[0])
+            avg_vol = sum(usdt_vol(k) for k in hist_klines) / len(hist_klines)
             return current_vol / avg_vol if avg_vol > 0 else None
         except Exception:
             return None
 
     async def _get_btc_6h_change(self) -> Optional[float]:
-        """BTC-USDT price change over last ~6 hours (1h klines)."""
-        klines = await self.api.get_klines("BTC-USDT", "1h", limit=8)
-        if len(klines) < 7:
+        """BTC-USDT price change over last ~6 hours.
+
+        Uses 7 completed 1h candles: klines[-6].open ≈ 6h ago,
+        klines[-1].close ≈ current. Previous impl used klines[-7] (limit=8) = ~7h back.
+        """
+        klines = await self.api.get_klines("BTC-USDT", "1h", limit=7)
+        if len(klines) < 6:
             return None
         try:
-            ref = float(klines[-7]["open"])
+            ref = float(klines[-6]["open"])
             cur = float(klines[-1]["close"])
             return (cur - ref) / ref * 100 if ref > 0 else None
         except Exception:
