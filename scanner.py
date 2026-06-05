@@ -167,6 +167,20 @@ class PumpScanner:
         if skipped_vol:
             logger.debug(f"Skipped {skipped_vol} low-volume symbols (<{self.min_volume_usdt:,.0f} USDT)")
 
+        # Check active positions against current prices and send results
+        prices = {}
+        for t in tickers:
+            sym = t.get("symbol", "")
+            try:
+                prices[sym] = float(t["lastPrice"])
+            except (KeyError, ValueError, TypeError):
+                pass
+        position_results = self.tracker.check_positions(prices)
+        for result in position_results:
+            msg = self._format_result(result)
+            if msg:
+                await self._send_telegram(msg)
+
         # Check candidates against cached opens
         sent = 0
         for sym, last_price, candle_time, open_price, vol_24h in candidates:
@@ -232,15 +246,18 @@ class PumpScanner:
         candle_time: int,
         vol_24h: float = 0.0,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h = await asyncio.gather(
-            self._get_rsi(symbol, "1h", current_price=close_p),
-            self._get_rsi(symbol, "4h", current_price=close_p),
-            self._get_rsi(symbol, "1d", current_price=close_p),
-            self.api.get_funding_rate(symbol),
-            self._get_ath_x(symbol, close_p),
-            self._get_vol_multiplier(symbol),
-            self._get_btc_6h_change(),
-            return_exceptions=True,
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, prev_klines = (
+            await asyncio.gather(
+                self._get_rsi(symbol, "1h", current_price=close_p),
+                self._get_rsi(symbol, "4h", current_price=close_p),
+                self._get_rsi(symbol, "1d", current_price=close_p),
+                self.api.get_funding_rate(symbol),
+                self._get_ath_x(symbol, close_p),
+                self._get_vol_multiplier(symbol),
+                self._get_btc_6h_change(),
+                self.api.get_klines(symbol, "30m", limit=2),
+                return_exceptions=True,
+            )
         )
 
         rsi_1h = rsi_1h if isinstance(rsi_1h, float) else None
@@ -251,7 +268,15 @@ class PumpScanner:
         vol_mult = vol_mult if isinstance(vol_mult, float) else None
         btc_6h = btc_6h if isinstance(btc_6h, float) else None
 
+        prev_close: Optional[float] = None
+        if isinstance(prev_klines, list) and len(prev_klines) >= 1:
+            try:
+                prev_close = float(prev_klines[-1]["close"])
+            except (KeyError, ValueError, TypeError):
+                pass
+
         daily_count = self.tracker.mark_sent(symbol, candle_time)
+        stops_today = self.tracker.get_stops_today(symbol)
 
         msg = format_pump_signal(
             symbol=symbol,
@@ -267,7 +292,7 @@ class PumpScanner:
         )
         await self._send_telegram(msg)
 
-        short_msg = format_short_analysis(
+        short_msg, total, wait_mode = format_short_analysis(
             symbol=symbol,
             pct=pct,
             current_price=close_p,
@@ -277,8 +302,14 @@ class PumpScanner:
             btc_6h_pct=btc_6h,
             ath_x=ath_x,
             funding=funding,
+            signal_per_day=daily_count,
+            prev_candle_close=prev_close,
+            stops_today=stops_today,
         )
         await self._send_telegram(short_msg)
+
+        if not wait_mode and total >= 0.0:
+            self.tracker.register_position(symbol, close_p, candle_time)
 
     # ------------------------------------------------------------------ #
     #  Helpers
@@ -366,6 +397,22 @@ class PumpScanner:
             return ath / current_price
         except Exception:
             return 0.0
+
+    def _format_result(self, result: dict) -> str:
+        """Format stop/take result message for a tracked position."""
+        sym = result["symbol"].replace("-USDT", "").replace("-USDC", "")
+        elapsed = result["elapsed_h"]
+        if result["outcome"] == "stop":
+            return (
+                f"⏱ {sym}/USDT итог (~{elapsed:.0f}ч): "
+                f"⛔ СТОП (+3%) — памп продолжился, шорт не сработал"
+            )
+        if result["outcome"] == "take":
+            return (
+                f"⏱ {sym}/USDT итог (~{elapsed:.0f}ч): "
+                f"✅ ТЕЙК (−5%) — откат отработал"
+            )
+        return ""  # timeout — no message
 
     async def _send_telegram(self, text: str):
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"

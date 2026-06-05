@@ -94,6 +94,49 @@ def _score_liquidity(vol_24h: float) -> tuple[Optional[str], Optional[str], floa
     return f"Оборот ${m:.1f}M — низкая ликвидность", "⚠️", -0.5
 
 
+def _score_repeat(signal_per_day: int) -> tuple[Optional[str], Optional[str], float]:
+    if signal_per_day >= 3:
+        return f"Памп №{signal_per_day} сегодня — монета-ракета, повторные пампы", "❌", -1.0
+    if signal_per_day >= 2:
+        return f"Памп №{signal_per_day} сегодня — повторный, осторожно", "⚠️", -0.5
+    return None, None, 0.0
+
+
+def _score_level(
+    current_price: float, prev_candle_close: Optional[float]
+) -> tuple[Optional[str], Optional[str], float]:
+    """Compare current pump price to the previous completed 30m candle's close.
+
+    If current_price ≈ prev_close: price returned to a recent level.
+    ratio < 1.0: approaching from below (continuation risk) → ❌
+    ratio ≥ 1.0: barely broke above (resistance) → ✅
+    """
+    if not prev_candle_close or prev_candle_close <= 0:
+        return None, None, 0.0
+    ratio = current_price / prev_candle_close
+    if 0.93 <= ratio < 1.0:
+        return (
+            f"Возврат к уровню ({ratio:.2f}) — 30м назад цена была тут, риск продолжения роста",
+            "❌", -1.0,
+        )
+    if 1.0 <= ratio <= 1.06:
+        return (
+            f"У сопротивления ({ratio:.2f}) — памп упёрся в уровень, разворот вероятен",
+            "✅", 1.0,
+        )
+    return None, None, 0.0
+
+
+def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[str], float]:
+    """Hard blocker: if ≥2 stops for this coin today, score −2 and warn."""
+    if stops_today >= 2:
+        return (
+            f"{stops_today} стопа по {coin} за 24ч — слишком агрессивный рост, пропускаем",
+            "❌", -2.0,
+        )
+    return None, None, 0.0
+
+
 def _verdict(score: float) -> tuple[str, str]:
     if score >= 1.0:
         return "🟢", "ВХОД — сильный сигнал"
@@ -113,9 +156,20 @@ def format_short_analysis(
     btc_6h_pct: Optional[float],
     ath_x: float,
     funding: Optional[float],
-) -> str:
+    signal_per_day: int = 1,
+    prev_candle_close: Optional[float] = None,
+    stops_today: int = 0,
+) -> tuple[str, float, bool]:
+    """Returns (message, total_score, wait_mode)."""
     criteria: list[tuple[str, str]] = []
     total = 0.0
+    coin = symbol.replace("-USDT", "").replace("-USDC", "")
+
+    # Stops blocker — shown first, large negative score
+    stops_label, stops_icon, stops_score = _score_stops(stops_today, coin)
+    if stops_icon:
+        criteria.append((stops_icon, stops_label))
+        total += stops_score
 
     label, icon, score = _score_rsi(rsi_1h)
     criteria.append((icon, label))
@@ -147,12 +201,22 @@ def format_short_analysis(
         criteria.append((liq_icon, liq_label))
         total += liq_score
 
+    # Level analysis (previous candle close)
+    lvl_label, lvl_icon, lvl_score = _score_level(current_price, prev_candle_close)
+    if lvl_icon:
+        criteria.append((lvl_icon, lvl_label))
+        total += lvl_score
+
+    # Repeat pump counter
+    rep_label, rep_icon, rep_score = _score_repeat(signal_per_day)
+    if rep_icon:
+        criteria.append((rep_icon, rep_label))
+        total += rep_score
+
     # Check ПОДОЖДАТЬ: large negative funding about to be charged
     fund_pct = funding * 100 if funding is not None else 0.0
     mins = _minutes_to_next_funding()
     wait_mode = fund_pct <= _FUNDING_WARN_PCT and mins < _FUNDING_WARN_MINUTES
-
-    coin = symbol.replace("-USDT", "").replace("-USDC", "")
 
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
@@ -191,4 +255,4 @@ def format_short_analysis(
             "🕒 Дождитесь начисления фандинга и перепроверьте сигнал",
         ])
 
-    return "\n".join(msg_lines)
+    return "\n".join(msg_lines), total, wait_mode
