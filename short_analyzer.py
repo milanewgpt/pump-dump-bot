@@ -45,12 +45,12 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
 def _score_vol(mult: Optional[float]) -> tuple[str, str, float]:
     if mult is None:
         return "Объём н/д", "▫️", 0.0
-    if mult < 1.0:
+    if mult < 2.0:
         return f"Объём {mult:.2f}x — низкий, импульс без поддержки", "✅", 1.0
-    if mult < 3.0:
+    if mult < 4.0:
         return f"Объём {mult:.2f}x — умеренный", "✅", 1.0
-    if mult < 5.0:
-        return f"Объём {mult:.2f}x — повышенный, осторожно", "⚠️", -0.5
+    if mult < 8.0:
+        return f"Объём {mult:.2f}x — высокий, осторожно", "⚠️", -0.5
     return f"Объём {mult:.2f}x — экстремальный, сильный моментум", "❌", -1.0
 
 

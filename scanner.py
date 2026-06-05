@@ -285,14 +285,18 @@ class PumpScanner:
     # ------------------------------------------------------------------ #
 
     async def _get_vol_multiplier(self, symbol: str) -> Optional[float]:
-        """Current 30m candle USDT volume vs average of 50 completed candles.
+        """Current 30m candle USDT volume rate vs average of 50 completed candles.
 
-        Uses startTime to fetch the current OPEN candle (BingX without startTime
-        returns only completed candles, so klines[-1] would be the previous candle).
-        USDT volume = volume * close for price-adjusted comparison.
+        Normalizes partial candle volume to a 30m rate so that a pump at minute 3
+        of the candle compares fairly to completed 30m candles.
+        Formula: (current_vol * 30 / elapsed_minutes) / avg_historical_vol
         """
+        now_ms = int(time.time() * 1000)
+        candle_start = current_candle_ts()
+        elapsed_min = max((now_ms - candle_start) / 60_000, 2.0)  # min 2 min
+
         curr_klines, hist_klines = await asyncio.gather(
-            self.api.get_klines(symbol, "30m", limit=1, start_time=current_candle_ts()),
+            self.api.get_klines(symbol, "30m", limit=1, start_time=candle_start),
             self.api.get_klines(symbol, "30m", limit=50),
             return_exceptions=True,
         )
@@ -305,7 +309,9 @@ class PumpScanner:
                 return float(k.get("volume", 0)) * float(k.get("close", 1))
             current_vol = usdt_vol(curr_klines[0])
             avg_vol = sum(usdt_vol(k) for k in hist_klines) / len(hist_klines)
-            return current_vol / avg_vol if avg_vol > 0 else None
+            if avg_vol <= 0:
+                return None
+            return current_vol * 30.0 / elapsed_min / avg_vol
         except Exception:
             return None
 
