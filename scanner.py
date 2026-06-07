@@ -255,7 +255,7 @@ class PumpScanner:
                 self._get_ath_x(symbol, close_p),
                 self._get_vol_multiplier(symbol),
                 self._get_btc_6h_change(),
-                self.api.get_klines(symbol, "30m", limit=2),
+                self.api.get_klines(symbol, "1h", limit=2),
                 return_exceptions=True,
             )
         )

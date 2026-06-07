@@ -105,24 +105,31 @@ def _score_repeat(signal_per_day: int) -> tuple[Optional[str], Optional[str], fl
 def _score_level(
     current_price: float, prev_candle_close: Optional[float]
 ) -> tuple[Optional[str], Optional[str], float]:
-    """Compare current pump price to the previous completed 30m candle's close.
+    """Compare current pump price to the previous completed 1h candle's close.
 
-    If current_price ≈ prev_close: price returned to a recent level.
-    ratio < 1.0: approaching from below (continuation risk) → ❌
-    ratio ≥ 1.0: barely broke above (resistance) → ✅
+    ratio = current_price / prev_1h_close:
+    - < 0.93: pump already above 1h level → fresh move, reversal likely ✅
+    - 0.93–1.0: price at/just above 1h level → at resistance ✅
+    - 1.0–1.2: price below 1h level, returning → continuation risk ❌
+    - ≥ 1.2: too far below level, not meaningful → no label
     """
     if not prev_candle_close or prev_candle_close <= 0:
         return None, None, 0.0
     ratio = current_price / prev_candle_close
-    if 0.93 <= ratio < 1.0:
+    if ratio < 0.93:
         return (
-            f"Возврат к уровню ({ratio:.2f}) — 30м назад цена была тут, риск продолжения роста",
-            "❌", -1.0,
-        )
-    if 1.0 <= ratio <= 1.06:
-        return (
-            f"У сопротивления ({ratio:.2f}) — памп упёрся в уровень, разворот вероятен",
+            f"Свежий памп ({ratio:.2f}) — выше 1ч уровня, откат вероятен",
             "✅", 1.0,
+        )
+    if ratio < 1.0:
+        return (
+            f"У сопротивления ({ratio:.2f}) — памп упёрся в 1ч уровень, разворот вероятен",
+            "✅", 1.0,
+        )
+    if ratio < 1.2:
+        return (
+            f"Возврат к уровню ({ratio:.2f}) — памп ниже 1ч уровня, риск продолжения роста",
+            "❌", -1.0,
         )
     return None, None, 0.0
 
