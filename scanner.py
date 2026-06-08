@@ -290,7 +290,6 @@ class PumpScanner:
             signal_per_day=daily_count,
             ath_x=ath_x,
         )
-        await self._send_telegram(msg)
 
         short_msg, total, wait_mode = format_short_analysis(
             symbol=symbol,
@@ -306,7 +305,7 @@ class PumpScanner:
             prev_candle_close=prev_close,
             stops_today=stops_today,
         )
-        await self._send_telegram(short_msg)
+        await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
         if not wait_mode and total >= 0.0:
             self.tracker.register_position(symbol, close_p, candle_time)
