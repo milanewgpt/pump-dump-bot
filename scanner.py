@@ -246,7 +246,7 @@ class PumpScanner:
         candle_time: int,
         vol_24h: float = 0.0,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, prev_klines = (
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, prev_klines, resistance_info, oi_usd = (
             await asyncio.gather(
                 self._get_rsi(symbol, "1h", current_price=close_p),
                 self._get_rsi(symbol, "4h", current_price=close_p),
@@ -256,6 +256,8 @@ class PumpScanner:
                 self._get_vol_multiplier(symbol),
                 self._get_btc_6h_change(),
                 self.api.get_klines(symbol, "1h", limit=2),
+                self._find_resistance(symbol, close_p),
+                self._get_oi_usd(symbol, close_p),
                 return_exceptions=True,
             )
         )
@@ -267,11 +269,13 @@ class PumpScanner:
         ath_x = ath_x if isinstance(ath_x, float) else 0.0
         vol_mult = vol_mult if isinstance(vol_mult, float) else None
         btc_6h = btc_6h if isinstance(btc_6h, float) else None
+        resistance_info = resistance_info if isinstance(resistance_info, tuple) else None
+        oi_usd = oi_usd if isinstance(oi_usd, float) else None
 
-        prev_close: Optional[float] = None
+        prev_1h_close: Optional[float] = None
         if isinstance(prev_klines, list) and len(prev_klines) >= 1:
             try:
-                prev_close = float(prev_klines[-1]["close"])
+                prev_1h_close = float(prev_klines[-1]["close"])
             except (KeyError, ValueError, TypeError):
                 pass
 
@@ -289,6 +293,8 @@ class PumpScanner:
             funding=funding,
             signal_per_day=daily_count,
             ath_x=ath_x,
+            vol_24h=vol_24h,
+            oi_usd=oi_usd,
         )
 
         short_msg, total, wait_mode = format_short_analysis(
@@ -302,17 +308,73 @@ class PumpScanner:
             ath_x=ath_x,
             funding=funding,
             signal_per_day=daily_count,
-            prev_candle_close=prev_close,
+            prev_1h_close=prev_1h_close,
+            resistance_info=resistance_info,
             stops_today=stops_today,
         )
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
-        if not wait_mode and total >= 0.0:
+        if not wait_mode and total >= 1.0:
             self.tracker.register_position(symbol, close_p, candle_time)
 
     # ------------------------------------------------------------------ #
     #  Helpers
     # ------------------------------------------------------------------ #
+
+    async def _find_resistance(
+        self, symbol: str, current_price: float
+    ) -> Optional[tuple[float, float, float]]:
+        """Find nearest strong resistance level above current price within 10%.
+
+        Uses 4h klines (300 candles ≈ 50 days). Returns (level, pct_above, drop_pct) or None.
+        Only returns levels with historical drop ≥ 20% (strong resistance).
+        """
+        klines = await self.api.get_klines(symbol, "4h", limit=300)
+        if not klines or current_price <= 0:
+            return None
+        try:
+            highs = [float(k["high"]) for k in klines]
+            closes = [float(k["close"]) for k in klines]
+        except (KeyError, ValueError, TypeError):
+            return None
+
+        n = len(highs)
+        if n < 20:
+            return None
+
+        candidates: list[tuple[float, float, float]] = []
+        window = 3
+
+        for i in range(window, n - window - 1):
+            local_high = highs[i]
+            if not all(local_high >= highs[j] for j in range(i - window, i + window + 1) if j != i):
+                continue
+            if local_high <= current_price:
+                continue
+            pct_above = (local_high - current_price) / current_price * 100
+            if pct_above > 10.0:
+                continue
+            look_ahead = min(20, n - i - 1)
+            if look_ahead < 3:
+                continue
+            min_close_after = min(closes[i + 1 : i + 1 + look_ahead])
+            drop_pct = (local_high - min_close_after) / local_high * 100
+            candidates.append((local_high, pct_above, drop_pct))
+
+        if not candidates:
+            return None
+
+        strong = [(lv, pa, dp) for lv, pa, dp in candidates if dp >= 20.0]
+        if strong:
+            return min(strong, key=lambda x: x[1])
+        return None
+
+    async def _get_oi_usd(self, symbol: str, current_price: float) -> Optional[float]:
+        """Return open interest in USD (OI in coins × current price)."""
+        oi = await self.api.get_open_interest(symbol)
+        if oi is None or oi <= 0:
+            return None
+        return oi * current_price
 
     async def _get_vol_multiplier(self, symbol: str) -> Optional[float]:
         """Current 30m candle USDT volume rate vs average of 50 completed candles.

@@ -76,6 +76,19 @@ class BingXAPI:
             return data
         return None
 
+    async def get_open_interest(self, symbol: str) -> Optional[float]:
+        """Return open interest in base currency (coins). Multiply by price for USD."""
+        data = await self._get(
+            "/openApi/swap/v2/quote/openInterest",
+            params={"symbol": symbol},
+        )
+        if not data:
+            return None
+        try:
+            return float(data.get("openInterest", 0))
+        except (TypeError, ValueError):
+            return None
+
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         """Return current funding rate as float (e.g. 0.0001 = 0.01%)."""
         data = await self._get(

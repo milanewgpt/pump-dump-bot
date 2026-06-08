@@ -50,7 +50,9 @@ def format_pump_signal(
     rsi_1d: Optional[float],
     funding: Optional[float],
     signal_per_day: int,
-    ath_x: float,           # ath / current_price
+    ath_x: float,
+    vol_24h: float = 0.0,
+    oi_usd: Optional[float] = None,
 ) -> str:
     bingx_url = f"https://swap.bingx.com/en/{symbol}"
     cg_url = f"https://www.coinglass.com/tv/BingX_{symbol}"
@@ -58,13 +60,22 @@ def format_pump_signal(
 
     ath_line = _ath_line(ath_x, close_price)
 
+    oi_line = ""
+    if oi_usd is not None and oi_usd > 0:
+        oi_m = oi_usd / 1_000_000
+        if vol_24h > 0:
+            oi_line = f"📈 OI: ${oi_m:.1f}M (×{oi_usd / vol_24h:.1f} к объёму)\n"
+        else:
+            oi_line = f"📈 OI: ${oi_m:.1f}M\n"
+
     return (
         f"🔵 <a href='{bingx_url}'>BingX</a> -30- "
         f"<a href='{cg_url}'>{symbol}</a> - "
         f"<a href='{tv_url}'>TV</a>\n"
         f"🟢 Pump: {pct:.2f}% ({_fmt_price(open_price)} - {_fmt_price(close_price)})\n"
         f"📊 RSI: 1H {_fmt_rsi(rsi_1h)} / 4H {_fmt_rsi(rsi_4h)} / 1D {_fmt_rsi(rsi_1d)}\n"
-        f"⚙️ Funding: {_fmt_funding(funding)}\n"
+        f"⚙️ Funding: {_fmt_funding(funding)}   💧 Объём 24ч: ${vol_24h / 1_000_000:.1f}M\n"
+        f"{oi_line}"
         f"🔈 Signal per day: {signal_per_day}\n"
         f"{ath_line}"
     )

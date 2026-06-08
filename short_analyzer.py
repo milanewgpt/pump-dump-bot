@@ -31,27 +31,19 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
     if rsi is None:
         return "RSI 1H н/д", "▫️", 0.0
     r = round(rsi)
-    if r >= 60:
-        return f"RSI 1H {r} — сильная перекупленность", "✅", 1.0
-    if r >= 45:
+    if r >= 40:
         return f"RSI 1H {r} — перекуплен, откат вероятен", "✅", 1.0
-    if r >= 38:
-        return f"RSI 1H {r} — перегрев умеренный", "▫️", 0.0
-    if r >= 32:
-        return f"RSI 1H {r} — перепродан, риск продолжения роста", "❌", -1.0
-    return f"RSI 1H {r} — перепродан, риск продолжения роста", "❌", -2.0
+    return f"RSI 1H {r} — низкий, памп без перегрева", "❌", -1.0
 
 
 def _score_vol(mult: Optional[float]) -> tuple[str, str, float]:
     if mult is None:
         return "Объём н/д", "▫️", 0.0
-    if mult < 2.0:
+    if mult < 3.0:
         return f"Объём {mult:.2f}x — низкий, импульс без поддержки", "✅", 1.0
-    if mult < 4.0:
-        return f"Объём {mult:.2f}x — умеренный", "✅", 1.0
-    if mult < 8.0:
-        return f"Объём {mult:.2f}x — высокий, осторожно", "⚠️", -0.5
-    return f"Объём {mult:.2f}x — экстремальный, сильный моментум", "❌", -1.0
+    if mult < 5.0:
+        return f"Объём {mult:.2f}x — умеренный, не влияет", "▫️", 0.0
+    return f"Объём {mult:.2f}x — высокий, повышенный риск", "❌", -1.0
 
 
 def _score_btc(pct: Optional[float]) -> tuple[str, str, float]:
@@ -61,7 +53,7 @@ def _score_btc(pct: Optional[float]) -> tuple[str, str, float]:
         return f"BTC {pct:+.1f}%/6ч — снижается, фон в плюс", "✅", 1.0
     if pct >= 1.5:
         return f"BTC {pct:+.1f}%/6ч — растёт, фон против шорта", "❌", -1.0
-    return f"BTC {pct:+.1f}%/6ч — боковик", "▫️", 0.0
+    return f"BTC {pct:+.1f}%/6ч — боковик, не влияет", "▫️", 0.0
 
 
 def _score_ath(ath_x: float) -> tuple[str, str, float]:
@@ -76,15 +68,15 @@ def _score_ath(ath_x: float) -> tuple[str, str, float]:
 
 
 def _score_funding(funding: Optional[float]) -> tuple[Optional[str], Optional[str], float]:
-    """funding as fraction (0.0001 = 0.01%). Returns (label, icon, score) or (None, None, 0)."""
+    """Positive funding = longs paying shorts = good for short entry.
+    Returns (label, icon, score) or (None, None, 0) when funding unavailable.
+    """
     if funding is None:
         return None, None, 0.0
     pct = funding * 100
-    if pct < 0:
-        return f"Фандинг {pct:.2f}% — отрицательный, перевес шортов", "✅", 1.0
-    if pct > 0.05:
-        return f"Фандинг {pct:.2f}% — повышенный", "⚠️", -0.5
-    return None, None, 0.0  # neutral (0–0.05%) — not shown
+    if pct > 0:
+        return f"Фандинг {pct:.4f}% — положительный, перевес лонгов (хорошо для шорта)", "✅", 1.0
+    return f"Фандинг {pct:.4f}% — нейтральный, не влияет", "▫️", 0.0
 
 
 def _score_liquidity(vol_24h: float) -> tuple[Optional[str], Optional[str], float]:
@@ -103,51 +95,65 @@ def _score_repeat(signal_per_day: int) -> tuple[Optional[str], Optional[str], fl
 
 
 def _score_level(
-    current_price: float, prev_candle_close: Optional[float]
+    current_price: float, prev_1h_close: Optional[float]
 ) -> tuple[Optional[str], Optional[str], float]:
-    """Compare current pump price to the previous completed 1h candle's close.
+    """Compare current price to the previous completed 1h candle close.
 
-    ratio = current_price / prev_1h_close:
-    - < 0.93: pump already above 1h level → fresh move, reversal likely ✅
-    - 0.93–1.0: price at/just above 1h level → at resistance ✅
-    - 1.0–1.2: price below 1h level, returning → continuation risk ❌
-    - ≥ 1.2: too far below level, not meaningful → no label
+    diff_pct = (current - prev_close) / prev_close × 100:
+    - > 10%: fresh pump above last hour level → reversal likely ✅
+    - 0–10%: moderate move, not decisive ▫️
+    - < 0%: price lower than 1h ago → returning to prior level, risk ❌
     """
-    if not prev_candle_close or prev_candle_close <= 0:
+    if not prev_1h_close or prev_1h_close <= 0:
         return None, None, 0.0
-    ratio = current_price / prev_candle_close
-    if ratio < 0.93:
+    diff_pct = (current_price - prev_1h_close) / prev_1h_close * 100
+    if diff_pct > 10.0:
         return (
-            f"Свежий памп ({ratio:.2f}) — выше 1ч уровня, откат вероятен",
+            f"Свежий памп (+{diff_pct:.1f}% за 1ч) — разворот вероятен",
             "✅", 1.0,
         )
-    if ratio < 1.0:
+    if diff_pct >= 0.0:
         return (
-            f"У сопротивления ({ratio:.2f}) — памп упёрся в 1ч уровень, разворот вероятен",
+            f"60 мин назад цена была лишь на {diff_pct:.1f}% ниже — умеренно, не влияет",
+            "▫️", 0.0,
+        )
+    return (
+        f"Возврат к уровню — 60 мин назад цена была выше (на {abs(diff_pct):.1f}%)",
+        "❌", -1.0,
+    )
+
+
+def _score_resistance(
+    resistance_info: Optional[tuple],
+) -> tuple[Optional[str], Optional[str], float]:
+    """Strong historical resistance within 10% above entry with ≥20% historical drop."""
+    if resistance_info is None:
+        return None, None, 0.0
+    level, pct_above, drop_pct = resistance_info
+    if drop_pct >= 20.0:
+        return (
+            f"Сильное сопр. {_fmt_price(level)} (+{pct_above:.1f}%, истор. обвал −{drop_pct:.0f}%) — мощный уровень для фейда",
             "✅", 1.0,
         )
-    if ratio < 1.2:
+    return (
+        f"Сопр. {_fmt_price(level)} (+{pct_above:.1f}%, истор. обвал −{drop_pct:.0f}%) — слабый уровень",
+        "▫️", 0.0,
+    )
+
+
+def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[str], float]:
+    if stops_today >= 2:
         return (
-            f"Возврат к уровню ({ratio:.2f}) — памп ниже 1ч уровня, риск продолжения роста",
+            f"{stops_today} стопа по {coin} за 24ч — монета-ракета",
             "❌", -1.0,
         )
     return None, None, 0.0
 
 
-def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[str], float]:
-    """Hard blocker: if ≥2 stops for this coin today, score −2 and warn."""
-    if stops_today >= 2:
-        return (
-            f"{stops_today} стопа по {coin} за 24ч — слишком агрессивный рост, пропускаем",
-            "❌", -2.0,
-        )
-    return None, None, 0.0
-
-
 def _verdict(score: float) -> tuple[str, str]:
-    if score >= 1.0:
+    if score >= 2.0:
         return "🟢", "ВХОД — сильный сигнал"
-    if score >= 0.0:
+    if score >= 1.0:
         return "🟡", "СЛАБЫЙ СИГНАЛ — лучше пропустить"
     return "🔴", "ПРОПУСК — не заходим"
 
@@ -164,7 +170,8 @@ def format_short_analysis(
     ath_x: float,
     funding: Optional[float],
     signal_per_day: int = 1,
-    prev_candle_close: Optional[float] = None,
+    prev_1h_close: Optional[float] = None,
+    resistance_info: Optional[tuple] = None,
     stops_today: int = 0,
 ) -> tuple[str, float, bool]:
     """Returns (message, total_score, wait_mode)."""
@@ -172,7 +179,7 @@ def format_short_analysis(
     total = 0.0
     coin = symbol.replace("-USDT", "").replace("-USDC", "")
 
-    # Stops blocker — shown first, large negative score
+    # Stops blocker — shown first
     stops_label, stops_icon, stops_score = _score_stops(stops_today, coin)
     if stops_icon:
         criteria.append((stops_icon, stops_label))
@@ -208,11 +215,17 @@ def format_short_analysis(
         criteria.append((liq_icon, liq_label))
         total += liq_score
 
-    # Level analysis (previous candle close)
-    lvl_label, lvl_icon, lvl_score = _score_level(current_price, prev_candle_close)
+    # Level analysis (1h reference)
+    lvl_label, lvl_icon, lvl_score = _score_level(current_price, prev_1h_close)
     if lvl_icon:
         criteria.append((lvl_icon, lvl_label))
         total += lvl_score
+
+    # Historical resistance
+    res_label, res_icon, res_score = _score_resistance(resistance_info)
+    if res_icon:
+        criteria.append((res_icon, res_label))
+        total += res_score
 
     # Repeat pump counter
     rep_label, rep_icon, rep_score = _score_repeat(signal_per_day)
@@ -220,7 +233,7 @@ def format_short_analysis(
         criteria.append((rep_icon, rep_label))
         total += rep_score
 
-    # Check ПОДОЖДАТЬ: large negative funding about to be charged
+    # Wait mode: large negative funding about to be charged
     fund_pct = funding * 100 if funding is not None else 0.0
     mins = _minutes_to_next_funding()
     wait_mode = fund_pct <= _FUNDING_WARN_PCT and mins < _FUNDING_WARN_MINUTES
@@ -246,7 +259,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    if not wait_mode and total >= 0.0:
+    if not wait_mode and total >= 1.0:
         sl = current_price * 1.03
         tp = current_price * 0.95
         msg_lines.extend([
