@@ -33,6 +33,8 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
     r = round(rsi)
     if r >= 40:
         return f"RSI 1H {r} — перекуплен, откат вероятен", "✅", 1.0
+    if r < 20:
+        return f"RSI 1H {r} — экстремально низкий, жёсткий блок", "🚫", -1.0
     return f"RSI 1H {r} — низкий, памп без перегрева", "❌", -1.0
 
 
@@ -238,6 +240,9 @@ def format_short_analysis(
     mins = _minutes_to_next_funding()
     wait_mode = fund_pct <= _FUNDING_WARN_PCT and mins < _FUNDING_WARN_MINUTES
 
+    # Hard block: RSI 1H < 20 = cold pump, continuation likely
+    rsi_block = rsi_1h is not None and round(rsi_1h) < 20
+
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
         wait_line = (
@@ -246,6 +251,8 @@ def format_short_analysis(
             f"~{int(mins)} мин — шорт сразу заплатит, лучше подождать",
         )
         criteria.insert(0, wait_line)
+    elif rsi_block:
+        v_emoji, v_label = "🔴", "ПРОПУСК — RSI экстремально низкий, памп без перегрева"
     else:
         v_emoji, v_label = _verdict(total)
 
@@ -259,7 +266,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    if not wait_mode and total >= 1.0:
+    if not wait_mode and not rsi_block and total >= 1.0:
         sl = current_price * 1.03
         tp = current_price * 0.95
         msg_lines.extend([
@@ -275,4 +282,5 @@ def format_short_analysis(
             "🕒 Дождитесь начисления фандинга и перепроверьте сигнал",
         ])
 
-    return "\n".join(msg_lines), total, wait_mode
+    effective_total = min(total, 0.9) if rsi_block else total
+    return "\n".join(msg_lines), effective_total, wait_mode
