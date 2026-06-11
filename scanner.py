@@ -297,7 +297,7 @@ class PumpScanner:
             oi_usd=oi_usd,
         )
 
-        short_msg, total, wait_mode = format_short_analysis(
+        short_msg, total, wait_mode, has_real_entry = format_short_analysis(
             symbol=symbol,
             pct=pct,
             current_price=close_p,
@@ -315,7 +315,7 @@ class PumpScanner:
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
         if not wait_mode and total >= 1.0:
-            self.tracker.register_position(symbol, close_p, candle_time)
+            self.tracker.register_position(symbol, close_p, candle_time, is_real=has_real_entry)
 
     # ------------------------------------------------------------------ #
     #  Helpers
@@ -463,14 +463,16 @@ class PumpScanner:
         """Format stop/take result message for a tracked position."""
         sym = result["symbol"].replace("-USDT", "").replace("-USDC", "")
         elapsed = result["elapsed_h"]
+        is_real = result.get("is_real", True)
+        tag = "" if is_real else " (статистика)"
         if result["outcome"] == "stop":
             return (
-                f"⏱ {sym}/USDT итог (~{elapsed:.0f}ч): "
+                f"⏱ {sym}/USDT итог{tag} (~{elapsed:.0f}ч): "
                 f"⛔ СТОП (+3%) — памп продолжился, шорт не сработал"
             )
         if result["outcome"] == "take":
             return (
-                f"⏱ {sym}/USDT итог (~{elapsed:.0f}ч): "
+                f"⏱ {sym}/USDT итог{tag} (~{elapsed:.0f}ч): "
                 f"✅ ТЕЙК (−5%) — откат отработал"
             )
         return ""  # timeout — no message

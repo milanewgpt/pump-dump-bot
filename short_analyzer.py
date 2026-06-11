@@ -243,6 +243,9 @@ def format_short_analysis(
     # Hard block: RSI 1H < 20 = cold pump, continuation likely
     rsi_block = rsi_1h is not None and round(rsi_1h) < 20
 
+    # Cooldown: 1 stop today — skip real entry, monitor for stats only
+    cooldown_block = stops_today == 1
+
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
         wait_line = (
@@ -253,6 +256,8 @@ def format_short_analysis(
         criteria.insert(0, wait_line)
     elif rsi_block:
         v_emoji, v_label = "🔴", "ПРОПУСК — RSI экстремально низкий, памп без перегрева"
+    elif cooldown_block:
+        v_emoji, v_label = "🕐", "КУЛДАУН — 1 стоп сегодня, вход пропущен (статистика)"
     else:
         v_emoji, v_label = _verdict(total)
 
@@ -266,7 +271,8 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    if not wait_mode and not rsi_block and total >= 1.0:
+    has_real_entry = not wait_mode and not rsi_block and not cooldown_block and total >= 2.0
+    if has_real_entry:
         sl = current_price * 1.03
         tp = current_price * 0.95
         msg_lines.extend([
@@ -282,5 +288,7 @@ def format_short_analysis(
             "🕒 Дождитесь начисления фандинга и перепроверьте сигнал",
         ])
 
+    # rsi_block: полный пропуск — не мониторим (effective < 1.0)
+    # cooldown / слабый / wait: мониторим статистику, но is_real=False
     effective_total = min(total, 0.9) if rsi_block else total
-    return "\n".join(msg_lines), effective_total, wait_mode
+    return "\n".join(msg_lines), effective_total, wait_mode, has_real_entry

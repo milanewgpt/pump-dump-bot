@@ -14,6 +14,7 @@ class ActivePosition:
     tp_price: float
     candle_time: int
     signal_time: float = field(default_factory=time.time)
+    is_real: bool = True  # False = статистический мониторинг без реального входа
 
 
 class SignalTracker:
@@ -59,14 +60,18 @@ class SignalTracker:
 
     # ---- position tracking ----
 
-    def register_position(self, symbol: str, entry_price: float, candle_time: int):
-        """Register a short position for result tracking (SL +3%, TP -5%)."""
+    def register_position(self, symbol: str, entry_price: float, candle_time: int, is_real: bool = True):
+        """Register a short position for result tracking (SL +3%, TP -5%).
+
+        is_real=False: monitor price for stats only, no actual trade registered.
+        """
         self._active[symbol] = ActivePosition(
             symbol=symbol,
             entry_price=entry_price,
             sl_price=entry_price * 1.03,
             tp_price=entry_price * 0.95,
             candle_time=candle_time,
+            is_real=is_real,
         )
 
     def check_positions(self, prices: dict[str, float]) -> list[dict]:
@@ -103,9 +108,10 @@ class SignalTracker:
                     "tp_price": pos.tp_price,
                     "outcome": outcome,
                     "elapsed_h": elapsed_h,
+                    "is_real": pos.is_real,
                 })
                 to_close.append(sym)
-                if outcome == "stop":
+                if outcome == "stop" and pos.is_real:
                     self._record_stop(sym)
 
         for sym in to_close:
