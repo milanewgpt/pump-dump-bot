@@ -8,10 +8,14 @@ Architecture (rate-limit-safe):
 """
 import asyncio
 import logging
+import os
 import time
 from typing import Optional
 
 import aiohttp
+
+_TRADE_WEBHOOK_URL = os.environ.get("TRADE_WEBHOOK_URL", "")
+_TRADE_WEBHOOK_SECRET = os.environ.get("TRADE_WEBHOOK_SECRET", "")
 
 from bingx_api import BingXAPI
 from indicators import calculate_rsi
@@ -317,6 +321,9 @@ class PumpScanner:
         if not wait_mode and total >= 1.0:
             self.tracker.register_position(symbol, close_p, candle_time, is_real=has_real_entry)
 
+        if has_real_entry and _TRADE_WEBHOOK_URL:
+            asyncio.create_task(self._fire_trade_webhook(symbol, close_p))
+
     # ------------------------------------------------------------------ #
     #  Helpers
     # ------------------------------------------------------------------ #
@@ -476,6 +483,20 @@ class PumpScanner:
                 f"✅ ТЕЙК (−5%) — откат отработал"
             )
         return ""  # timeout — no message
+
+    async def _fire_trade_webhook(self, symbol: str, price: float):
+        payload = {"symbol": symbol, "price": price}
+        headers = {"X-Secret": _TRADE_WEBHOOK_SECRET, "Content-Type": "application/json"}
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    _TRADE_WEBHOOK_URL, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Trade webhook {symbol}: status {resp.status}")
+        except Exception as e:
+            logger.warning(f"Trade webhook {symbol}: {e}")
 
     async def _send_telegram(self, text: str):
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
