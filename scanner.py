@@ -250,7 +250,7 @@ class PumpScanner:
         candle_time: int,
         vol_24h: float = 0.0,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, prev_klines, resistance_info, oi_usd = (
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, prev_klines, resistance_info, oi_usd, binance_price = (
             await asyncio.gather(
                 self._get_rsi(symbol, "1h", current_price=close_p),
                 self._get_rsi(symbol, "4h", current_price=close_p),
@@ -262,6 +262,7 @@ class PumpScanner:
                 self.api.get_klines(symbol, "1h", limit=2),
                 self._find_resistance(symbol, close_p),
                 self._get_oi_usd(symbol, close_p),
+                self._get_binance_price(symbol),
                 return_exceptions=True,
             )
         )
@@ -275,6 +276,11 @@ class PumpScanner:
         btc_6h = btc_6h if isinstance(btc_6h, float) else None
         resistance_info = resistance_info if isinstance(resistance_info, tuple) else None
         oi_usd = oi_usd if isinstance(oi_usd, float) else None
+        binance_price = binance_price if isinstance(binance_price, float) else None
+
+        arb_spread_pct: Optional[float] = None
+        if binance_price and close_p > 0:
+            arb_spread_pct = (binance_price - close_p) / close_p * 100
 
         prev_1h_close: Optional[float] = None
         if isinstance(prev_klines, list) and len(prev_klines) >= 1:
@@ -315,6 +321,7 @@ class PumpScanner:
             prev_1h_close=prev_1h_close,
             resistance_info=resistance_info,
             stops_today=stops_today,
+            arb_spread_pct=arb_spread_pct,
         )
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
@@ -453,6 +460,19 @@ class PumpScanner:
             if current_price is not None:
                 closes.append(current_price)
             return calculate_rsi(closes)
+        except Exception:
+            return None
+
+    async def _get_binance_price(self, symbol: str) -> Optional[float]:
+        """Fetch last price from Binance futures for arb-pump detection."""
+        coin = symbol.replace("-USDT", "").replace("-USDC", "")
+        url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={coin}USDT"
+        try:
+            async with self.api.session.get(
+                url, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                data = await resp.json()
+                return float(data["price"])
         except Exception:
             return None
 

@@ -71,14 +71,34 @@ def _score_ath(ath_x: float) -> tuple[str, str, float]:
 
 def _score_funding(funding: Optional[float]) -> tuple[Optional[str], Optional[str], float]:
     """Positive funding = longs paying shorts = good for short entry.
+    Strongly negative funding = shorts dominant = squeeze risk = block entry.
     Returns (label, icon, score) or (None, None, 0) when funding unavailable.
     """
     if funding is None:
         return None, None, 0.0
     pct = funding * 100
-    if pct > 0:
+    if pct >= 0:
         return f"Фандинг {pct:.4f}% — положительный, перевес лонгов (хорошо для шорта)", "✅", 1.0
+    if pct < -1.0:
+        return f"Фандинг {pct:.4f}% — сильно отрицательный, перевес шортов (риск сквиза вверх)", "❌", -1.0
     return f"Фандинг {pct:.4f}% — нейтральный, не влияет", "▫️", 0.0
+
+
+def _score_arb_pump(arb_spread_pct: Optional[float]) -> tuple[Optional[str], Optional[str], float]:
+    """Arbitrage pump: Binance price significantly above BingX = spread closing, not real momentum."""
+    if arb_spread_pct is None or arb_spread_pct <= 0:
+        return None, None, 0.0
+    if arb_spread_pct >= 5.0:
+        return (
+            f"Арбитражный памп — Binance выше BingX на {arb_spread_pct:.1f}%, закрытие спреда",
+            "❌", -2.0,
+        )
+    if arb_spread_pct >= 2.0:
+        return (
+            f"Спред с Binance {arb_spread_pct:.1f}% — возможный арбитраж, осторожно",
+            "⚠️", -0.5,
+        )
+    return None, None, 0.0
 
 
 def _score_liquidity(vol_24h: float) -> tuple[Optional[str], Optional[str], float]:
@@ -175,8 +195,9 @@ def format_short_analysis(
     prev_1h_close: Optional[float] = None,
     resistance_info: Optional[tuple] = None,
     stops_today: int = 0,
-) -> tuple[str, float, bool]:
-    """Returns (message, total_score, wait_mode)."""
+    arb_spread_pct: Optional[float] = None,
+) -> tuple[str, float, bool, bool]:
+    """Returns (message, total_score, wait_mode, has_real_entry)."""
     criteria: list[tuple[str, str]] = []
     total = 0.0
     coin = symbol.replace("-USDT", "").replace("-USDC", "")
@@ -235,6 +256,12 @@ def format_short_analysis(
         criteria.append((rep_icon, rep_label))
         total += rep_score
 
+    # Arbitrage pump check
+    arb_label, arb_icon, arb_score = _score_arb_pump(arb_spread_pct)
+    if arb_icon:
+        criteria.append((arb_icon, arb_label))
+        total += arb_score
+
     # Wait mode: large negative funding about to be charged
     fund_pct = funding * 100 if funding is not None else 0.0
     mins = _minutes_to_next_funding()
@@ -242,6 +269,12 @@ def format_short_analysis(
 
     # Hard block: RSI 1H < 20 = cold pump, continuation likely
     rsi_block = rsi_1h is not None and round(rsi_1h) < 20
+
+    # Hard block: funding < -1% = squeeze risk
+    funding_block = funding is not None and funding * 100 < -1.0
+
+    # Hard block: arbitrage pump = spread ≥5%, not real momentum
+    arb_block = arb_spread_pct is not None and arb_spread_pct >= 5.0
 
     # Cooldown: 1 stop today — skip real entry, monitor for stats only
     cooldown_block = stops_today == 1
@@ -254,6 +287,10 @@ def format_short_analysis(
             f"~{int(mins)} мин — шорт сразу заплатит, лучше подождать",
         )
         criteria.insert(0, wait_line)
+    elif arb_block:
+        v_emoji, v_label = "🔴", "ПРОПУСК — арбитражный памп, закрытие спреда с Binance"
+    elif funding_block:
+        v_emoji, v_label = "🔴", f"ПРОПУСК — отрицательный фандинг {fund_pct:.4f}%, риск сквиза"
     elif rsi_block:
         v_emoji, v_label = "🔴", "ПРОПУСК — RSI экстремально низкий, памп без перегрева"
     elif cooldown_block:
@@ -271,7 +308,8 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    has_real_entry = not wait_mode and not rsi_block and not cooldown_block and total >= 2.0
+    hard_block = wait_mode or arb_block or funding_block or rsi_block
+    has_real_entry = not hard_block and not cooldown_block and total >= 2.0
     if has_real_entry:
         sl = current_price * 1.03
         tp = current_price * 0.95
@@ -288,7 +326,7 @@ def format_short_analysis(
             "🕒 Дождитесь начисления фандинга и перепроверьте сигнал",
         ])
 
-    # rsi_block: полный пропуск — не мониторим (effective < 1.0)
+    # hard blocks: полный пропуск — не мониторим (effective < 1.0)
     # cooldown / слабый / wait: мониторим статистику, но is_real=False
-    effective_total = min(total, 0.9) if rsi_block else total
+    effective_total = min(total, 0.9) if hard_block else total
     return "\n".join(msg_lines), effective_total, wait_mode, has_real_entry
