@@ -1,15 +1,16 @@
 """Core scanner: polls BingX, detects pumps, fires Telegram signals.
 
-Architecture (rate-limit-safe):
-  - Every SCAN_INTERVAL: fetch all tickers in ONE request (694 pairs).
-  - Compare lastPrice vs cached 30m candle open.
-  - Cache miss (new candle or first run): fetch klines lazily, in small batches.
+Architecture:
+  - Every SCAN_INTERVAL: fetch all tickers in ONE request (~660 pairs).
+  - Rolling 30-minute window: compare lastPrice vs price 30 min ago per symbol.
+  - No candle-cache needed — reference price is recorded from live ticker history.
   - Enrichment (RSI/funding/ATH): fetched only when a signal fires.
 """
 import asyncio
 import logging
 import os
 import time
+from collections import deque
 from typing import Optional
 
 import aiohttp
@@ -25,10 +26,10 @@ from tracker import SignalTracker
 
 logger = logging.getLogger(__name__)
 
-CANDLE_PERIOD_MS = 30 * 60 * 1000      # 30 minutes in milliseconds
-REFRESH_BATCH_SIZE = 15                  # symbols per batch when refreshing cache
-REFRESH_BATCH_DELAY = 1.0               # seconds between refresh batches
-MAX_STALE_PER_CYCLE = 50                # cap stale refresh per cycle (reduces blind window from 66s→~8s)
+ROLL_WINDOW_MS    = 30 * 60 * 1000   # lookback: compare current price to price 30 min ago
+ROLL_MAX_AGE_MS   = 35 * 60 * 1000   # keep price history up to 35 min
+SIGNAL_COOLDOWN_MS = 25 * 60 * 1000  # suppress re-signal for same symbol for 25 min
+CANDLE_PERIOD_MS  = 30 * 60 * 1000   # still used for vol-multiplier and tracker
 
 
 def current_candle_ts() -> int:
@@ -53,8 +54,10 @@ class PumpScanner:
         self.min_volume_usdt = min_volume_usdt
         self.tracker = SignalTracker()
 
-        # symbol -> (candle_open_time_ms, open_price)
-        self._candle_cache: dict[str, tuple[int, float]] = {}
+        # Rolling price history: symbol -> deque of (timestamp_ms, price), oldest first
+        self._price_history: dict[str, deque] = {}
+        # Timestamp (ms) of last signal sent per symbol (for dedup)
+        self._last_signal_ms: dict[str, int] = {}
         # symbols present in the previous bulk ticker response (for dropout detection)
         self._last_ticker_syms: set[str] = set()
         # symbols currently absent from bulk ticker (fetched individually every cycle)
@@ -89,48 +92,15 @@ class PumpScanner:
             logger.warning("Ticker returned 0 items — skipping cycle")
             return
 
-        now_candle = current_candle_ts()
+        now_ms = int(time.time() * 1000)
+        ref_ts = now_ms - ROLL_WINDOW_MS
         logger.info(f"Scanning {len(tickers)} symbols via ticker…")
 
-        # Build volume lookup for sorting stale symbols (high-volume first)
-        vol_by_sym: dict[str, float] = {}
-        for t in tickers:
-            sym = t.get("symbol", "")
-            try:
-                vol_by_sym[sym] = float(t.get("quoteVolume", 0))
-            except (ValueError, TypeError):
-                vol_by_sym[sym] = 0.0
-
-        stale: list[str] = []
-        for t in tickers:
-            sym = t.get("symbol", "")
-            cached = self._candle_cache.get(sym)
-            if cached is None or cached[0] < now_candle:
-                stale.append(sym)
-
-        # Sort stale by volume descending — high-volume coins refreshed first
-        stale.sort(key=lambda s: vol_by_sym.get(s, 0), reverse=True)
-
-        # Cap per-cycle refresh to avoid long blind windows at candle boundaries
-        # (top MAX_STALE_PER_CYCLE by volume; remainder picked up in subsequent cycles)
-        if len(stale) > MAX_STALE_PER_CYCLE:
-            logger.info(f"Refreshing top {MAX_STALE_PER_CYCLE}/{len(stale)} stale symbols by volume")
-            stale = stale[:MAX_STALE_PER_CYCLE]
-
-        # Refresh stale cache entries, then re-fetch fresh ticker prices
-        if stale:
-            logger.info(f"Refreshing cache for {len(stale)} symbol(s)…")
-            refreshed = await self._refresh_cache(stale)
-            logger.info(f"Cache refreshed: {refreshed}/{len(stale)}")
-            # Re-fetch ticker so we check FRESH prices after cache is updated
-            tickers = await self.api.get_all_tickers() or tickers
-
-        # Persistent absent-symbol tracking: keep fetching symbols missing from bulk
-        # ticker every cycle until they return (one-shot was insufficient for slow pumps)
+        # Persistent absent-symbol tracking
         ticker_syms = {t.get("symbol", "") for t in tickers}
         newly_gone = self._last_ticker_syms - ticker_syms
         self._absent_syms = (self._absent_syms | newly_gone) - ticker_syms
-        self._absent_syms &= set(self._candle_cache.keys())  # only if cache exists
+        self._absent_syms &= set(self._price_history.keys())
         self._last_ticker_syms = ticker_syms
         if self._absent_syms:
             to_fetch = list(self._absent_syms)[:5]
@@ -143,99 +113,76 @@ class PumpScanner:
                 if isinstance(item, dict) and item.get("symbol"):
                     tickers.append(item)
 
-        # Build candidates: cache must exist, must be current candle, volume + min price filters
-        candidates: list[tuple[str, float, int, float, float]] = []  # sym, last_price, candle_time, open_price, vol_24h
+        # Build price lookup and collect candidates
+        prices: dict[str, float] = {}
+        candidates: list[tuple[str, float, float, float, float]] = []  # sym, pct, ref_price, last_price, vol_24h
         skipped_vol = 0
+
         for t in tickers:
             sym = t.get("symbol", "")
-            cached = self._candle_cache.get(sym)
-            if not cached:
-                continue  # cache still missing (rate-limited) — skip this cycle
-            candle_time, open_price = cached
-            if candle_time < now_candle:
-                continue  # stale open from previous candle — skip to avoid wrong-candle signals
-            if open_price == 0:
-                continue
             try:
                 vol = float(t.get("quoteVolume", 0))
-                if vol < self.min_volume_usdt:
-                    skipped_vol += 1
-                    logger.debug(f"Vol skip: {sym} = {vol:,.0f} USDT")
-                    continue
                 last_price = float(t["lastPrice"])
-                if last_price < 0.001:
-                    continue
-                candidates.append((sym, last_price, candle_time, open_price, vol))
-            except (ValueError, TypeError):
-                pass
+            except (KeyError, ValueError, TypeError):
+                continue
+
+            prices[sym] = last_price
+
+            if vol < self.min_volume_usdt:
+                skipped_vol += 1
+                continue
+            if last_price < 0.001:
+                continue
+
+            # Update rolling price history
+            if sym not in self._price_history:
+                self._price_history[sym] = deque()
+            hist = self._price_history[sym]
+            hist.append((now_ms, last_price))
+            while hist and hist[0][0] < now_ms - ROLL_MAX_AGE_MS:
+                hist.popleft()
+
+            # Find reference price from ~30 min ago (most recent entry at or before ref_ts)
+            ref_price = None
+            for ts, px in hist:
+                if ts <= ref_ts:
+                    ref_price = px
+                else:
+                    break
+            if ref_price is None:
+                continue  # less than 30 min of history — skip
+
+            pct = (last_price - ref_price) / ref_price * 100
+            if pct < self.min_pump_pct:
+                continue
+
+            # Dedup: suppress same symbol for SIGNAL_COOLDOWN_MS after last signal
+            if now_ms - self._last_signal_ms.get(sym, 0) < SIGNAL_COOLDOWN_MS:
+                continue
+
+            candidates.append((sym, pct, ref_price, last_price, vol))
+
         if skipped_vol:
             logger.debug(f"Skipped {skipped_vol} low-volume symbols (<{self.min_volume_usdt:,.0f} USDT)")
 
         # Check active positions against current prices and send results
-        prices = {}
-        for t in tickers:
-            sym = t.get("symbol", "")
-            try:
-                prices[sym] = float(t["lastPrice"])
-            except (KeyError, ValueError, TypeError):
-                pass
         position_results = self.tracker.check_positions(prices)
         for result in position_results:
             msg = self._format_result(result)
             if msg:
                 await self._send_telegram(msg)
 
-        # Check candidates against cached opens
+        # Fire signals
         sent = 0
-        for sym, last_price, candle_time, open_price, vol_24h in candidates:
-            pct = (last_price - open_price) / open_price * 100
-            if pct < self.min_pump_pct:
-                continue
-            if self.tracker.is_duplicate(sym, candle_time):
-                continue
-
-            logger.info(f"🔥 Pump detected: {sym} +{pct:.2f}%")
-            await self._send_signal(sym, pct, open_price, last_price, candle_time, vol_24h)
+        candle_time = current_candle_ts()
+        for sym, pct, ref_price, last_price, vol_24h in candidates:
+            self._last_signal_ms[sym] = now_ms
+            logger.info(f"🔥 Pump detected: {sym} +{pct:.2f}% (rolling 30m)")
+            await self._send_signal(sym, pct, ref_price, last_price, candle_time, vol_24h)
             sent += 1
 
         if sent:
             logger.info(f"✅ Sent {sent} signal(s) this cycle")
-
-    # ------------------------------------------------------------------ #
-    #  Cache refresh
-    # ------------------------------------------------------------------ #
-
-    async def _refresh_cache(self, symbols: list[str]) -> int:
-        """Fetch 30m klines for each symbol and update cache. Returns count refreshed."""
-        count = 0
-        for i in range(0, len(symbols), REFRESH_BATCH_SIZE):
-            batch = symbols[i : i + REFRESH_BATCH_SIZE]
-            results = await asyncio.gather(
-                *[self._fetch_candle_open(sym) for sym in batch],
-                return_exceptions=True,
-            )
-            for sym, res in zip(batch, results):
-                if isinstance(res, tuple):
-                    self._candle_cache[sym] = res
-                    count += 1
-            if i + REFRESH_BATCH_SIZE < len(symbols):
-                await asyncio.sleep(REFRESH_BATCH_DELAY)
-        return count
-
-    async def _fetch_candle_open(self, symbol: str) -> Optional[tuple[int, float]]:
-        # startTime=current candle open ensures we get THIS candle, not the previous closed one
-        klines = await self.api.get_klines(symbol, "30m", limit=1, start_time=current_candle_ts())
-        if not klines:
-            return None
-        try:
-            k = klines[-1]
-            ts = int(k["time"])
-            # Reject if BingX returned a candle from a previous period
-            if ts < current_candle_ts():
-                return None
-            return (ts, float(k["open"]))
-        except (KeyError, ValueError, TypeError):
-            return None
 
     # ------------------------------------------------------------------ #
     #  Enrich & send signal
