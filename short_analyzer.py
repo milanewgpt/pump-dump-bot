@@ -117,18 +117,18 @@ def _score_repeat(signal_per_day: int) -> tuple[Optional[str], Optional[str], fl
 
 
 def _score_level(
-    current_price: float, prev_1h_close: Optional[float]
+    current_price: float, price_60min_ago: Optional[float]
 ) -> tuple[Optional[str], Optional[str], float]:
-    """Compare current price to the previous completed 1h candle close.
+    """Compare current price to actual price 60 min ago (from rolling history).
 
-    diff_pct = (current - prev_close) / prev_close × 100:
-    - > 10%: fresh pump above last hour level → reversal likely ✅
+    diff_pct = (current - price_60min_ago) / price_60min_ago × 100:
+    - > 10%: fresh pump above 60-min level → reversal likely ✅
     - 0–10%: moderate move, not decisive ▫️
-    - < 0%: price lower than 1h ago → returning to prior level, risk ❌
+    - < 0%: price lower than 60 min ago → bounce/recovery, not a fresh pump ❌ (hard block)
     """
-    if not prev_1h_close or prev_1h_close <= 0:
+    if not price_60min_ago or price_60min_ago <= 0:
         return None, None, 0.0
-    diff_pct = (current_price - prev_1h_close) / prev_1h_close * 100
+    diff_pct = (current_price - price_60min_ago) / price_60min_ago * 100
     if diff_pct > 10.0:
         return (
             f"Свежий памп (+{diff_pct:.1f}% за 1ч) — разворот вероятен",
@@ -192,7 +192,7 @@ def format_short_analysis(
     ath_x: float,
     funding: Optional[float],
     signal_per_day: int = 1,
-    prev_1h_close: Optional[float] = None,
+    price_60min_ago: Optional[float] = None,
     resistance_info: Optional[tuple] = None,
     stops_today: int = 0,
     arb_spread_pct: Optional[float] = None,
@@ -238,8 +238,8 @@ def format_short_analysis(
         criteria.append((liq_icon, liq_label))
         total += liq_score
 
-    # Level analysis (1h reference)
-    lvl_label, lvl_icon, lvl_score = _score_level(current_price, prev_1h_close)
+    # Level analysis (60-min rolling reference)
+    lvl_label, lvl_icon, lvl_score = _score_level(current_price, price_60min_ago)
     if lvl_icon:
         criteria.append((lvl_icon, lvl_label))
         total += lvl_score
@@ -276,6 +276,13 @@ def format_short_analysis(
     # Hard block: arbitrage pump = spread ≥5%, not real momentum
     arb_block = arb_spread_pct is not None and arb_spread_pct >= 5.0
 
+    # Hard block: price lower than 60 min ago = bounce/recovery, not fresh pump
+    level_block = (
+        price_60min_ago is not None
+        and price_60min_ago > 0
+        and current_price < price_60min_ago
+    )
+
     # Cooldown: 1 stop today — skip real entry, monitor for stats only
     cooldown_block = stops_today == 1
 
@@ -293,6 +300,9 @@ def format_short_analysis(
         v_emoji, v_label = "🔴", f"ПРОПУСК — отрицательный фандинг {fund_pct:.4f}%, риск сквиза"
     elif rsi_block:
         v_emoji, v_label = "🔴", "ПРОПУСК — RSI экстремально низкий, памп без перегрева"
+    elif level_block:
+        lvl_diff = abs((current_price - price_60min_ago) / price_60min_ago * 100)
+        v_emoji, v_label = "🔴", f"ПРОПУСК — возврат к уровню, 60 мин назад цена была выше на {lvl_diff:.1f}%"
     elif cooldown_block:
         v_emoji, v_label = "🕐", "КУЛДАУН — 1 стоп сегодня, вход пропущен (статистика)"
     else:
@@ -308,7 +318,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    hard_block = wait_mode or arb_block or funding_block or rsi_block
+    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block
     has_real_entry = not hard_block and not cooldown_block and total >= 2.0
     if has_real_entry:
         sl = current_price * 1.03

@@ -27,7 +27,8 @@ from tracker import SignalTracker
 logger = logging.getLogger(__name__)
 
 ROLL_WINDOW_MS    = 30 * 60 * 1000   # lookback: compare current price to price 30 min ago
-ROLL_MAX_AGE_MS   = 35 * 60 * 1000   # keep price history up to 35 min
+ROLL_MAX_AGE_MS   = 65 * 60 * 1000   # keep price history up to 65 min (need 60-min lookback)
+ROLL_LOOKBACK_60_MS = 60 * 60 * 1000  # for "return to level" check: price 60 min ago
 SIGNAL_COOLDOWN_MS = 25 * 60 * 1000  # suppress re-signal for same symbol for 25 min
 CANDLE_PERIOD_MS  = 30 * 60 * 1000   # still used for vol-multiplier and tracker
 
@@ -115,7 +116,7 @@ class PumpScanner:
 
         # Build price lookup and collect candidates
         prices: dict[str, float] = {}
-        candidates: list[tuple[str, float, float, float, float]] = []  # sym, pct, ref_price, last_price, vol_24h
+        candidates: list[tuple[str, float, float, float, float, Optional[float]]] = []  # sym, pct, ref_price, last_price, vol_24h, price_60min_ago
         skipped_vol = 0
 
         for t in tickers:
@@ -143,8 +144,13 @@ class PumpScanner:
                 hist.popleft()
 
             # Find reference price from ~30 min ago (most recent entry at or before ref_ts)
+            # Also find price from ~60 min ago for "return to level" check
+            ref_ts_60 = now_ms - ROLL_LOOKBACK_60_MS
             ref_price = None
+            price_60min_ago: Optional[float] = None
             for ts, px in hist:
+                if ts <= ref_ts_60:
+                    price_60min_ago = px
                 if ts <= ref_ts:
                     ref_price = px
                 else:
@@ -160,7 +166,7 @@ class PumpScanner:
             if now_ms - self._last_signal_ms.get(sym, 0) < SIGNAL_COOLDOWN_MS:
                 continue
 
-            candidates.append((sym, pct, ref_price, last_price, vol))
+            candidates.append((sym, pct, ref_price, last_price, vol, price_60min_ago))
 
         if skipped_vol:
             logger.debug(f"Skipped {skipped_vol} low-volume symbols (<{self.min_volume_usdt:,.0f} USDT)")
@@ -175,10 +181,10 @@ class PumpScanner:
         # Fire signals
         sent = 0
         candle_time = current_candle_ts()
-        for sym, pct, ref_price, last_price, vol_24h in candidates:
+        for sym, pct, ref_price, last_price, vol_24h, price_60min_ago in candidates:
             self._last_signal_ms[sym] = now_ms
             logger.info(f"🔥 Pump detected: {sym} +{pct:.2f}% (rolling 30m)")
-            await self._send_signal(sym, pct, ref_price, last_price, candle_time, vol_24h)
+            await self._send_signal(sym, pct, ref_price, last_price, candle_time, vol_24h, price_60min_ago)
             sent += 1
 
         if sent:
@@ -196,8 +202,9 @@ class PumpScanner:
         close_p: float,
         candle_time: int,
         vol_24h: float = 0.0,
+        price_60min_ago: Optional[float] = None,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, prev_klines, resistance_info, oi_usd, binance_price = (
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, oi_usd, binance_price = (
             await asyncio.gather(
                 self._get_rsi(symbol, "1h", current_price=close_p),
                 self._get_rsi(symbol, "4h", current_price=close_p),
@@ -206,7 +213,6 @@ class PumpScanner:
                 self._get_ath_x(symbol, close_p),
                 self._get_vol_multiplier(symbol),
                 self._get_btc_6h_change(),
-                self.api.get_klines(symbol, "1h", limit=2),
                 self._find_resistance(symbol, close_p),
                 self._get_oi_usd(symbol, close_p),
                 self._get_binance_price(symbol),
@@ -228,13 +234,6 @@ class PumpScanner:
         arb_spread_pct: Optional[float] = None
         if binance_price and close_p > 0:
             arb_spread_pct = (binance_price - close_p) / close_p * 100
-
-        prev_1h_close: Optional[float] = None
-        if isinstance(prev_klines, list) and len(prev_klines) >= 1:
-            try:
-                prev_1h_close = float(prev_klines[-1]["close"])
-            except (KeyError, ValueError, TypeError):
-                pass
 
         daily_count = self.tracker.mark_sent(symbol, candle_time)
         stops_today = self.tracker.get_stops_today(symbol)
@@ -265,7 +264,7 @@ class PumpScanner:
             ath_x=ath_x,
             funding=funding,
             signal_per_day=daily_count,
-            prev_1h_close=prev_1h_close,
+            price_60min_ago=price_60min_ago,
             resistance_info=resistance_info,
             stops_today=stops_today,
             arb_spread_pct=arb_spread_pct,
