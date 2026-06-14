@@ -283,8 +283,8 @@ def format_short_analysis(
         and current_price < price_60min_ago
     )
 
-    # Cooldown: 1 stop today — skip real entry, monitor for stats only
-    cooldown_block = stops_today == 1
+    # Hard block: ≥6 signals today on this coin = overheated, like competitor
+    signal_block = signal_per_day >= 6
 
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
@@ -303,8 +303,8 @@ def format_short_analysis(
     elif level_block:
         lvl_diff = abs((current_price - price_60min_ago) / price_60min_ago * 100)
         v_emoji, v_label = "🔴", f"ПРОПУСК — возврат к уровню, 60 мин назад цена была выше на {lvl_diff:.1f}%"
-    elif cooldown_block:
-        v_emoji, v_label = "🕐", "КУЛДАУН — 1 стоп сегодня, вход пропущен (статистика)"
+    elif signal_block:
+        v_emoji, v_label = "🔴", f"ПРОПУСК — {signal_per_day}-й сигнал по монете за день, перегрета"
     else:
         v_emoji, v_label = _verdict(total)
 
@@ -318,8 +318,8 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block
-    has_real_entry = not hard_block and not cooldown_block and total >= 2.0
+    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or signal_block
+    has_real_entry = not hard_block and total >= 2.0
     if has_real_entry:
         sl = current_price * 1.03
         tp = current_price * 0.95
