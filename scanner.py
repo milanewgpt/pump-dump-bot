@@ -206,9 +206,9 @@ class PumpScanner:
     ):
         rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, oi_usd, binance_price = (
             await asyncio.gather(
-                self._get_rsi(symbol, "1h", current_price=close_p),
-                self._get_rsi(symbol, "4h", current_price=close_p),
-                self._get_rsi(symbol, "1d", current_price=close_p),
+                self._get_rsi(symbol, "1h"),
+                self._get_rsi(symbol, "4h"),
+                self._get_rsi(symbol, "1d"),
                 self.api.get_funding_rate(symbol),
                 self._get_ath_x(symbol, close_p),
                 self._get_vol_multiplier(symbol),
@@ -393,20 +393,13 @@ class PumpScanner:
         except Exception:
             return None
 
-    async def _get_rsi(self, symbol: str, interval: str, current_price: Optional[float] = None) -> Optional[float]:
-        """100 completed candles + optionally append current live price.
-
-        BingX returns only completed candles without startTime, so the current
-        candle (which includes the pump) is missing. Appending current_price
-        gives RSI that reflects the live overbought state.
-        """
+    async def _get_rsi(self, symbol: str, interval: str) -> Optional[float]:
+        """RSI on completed candles only (no current open candle)."""
         klines = await self.api.get_klines(symbol, interval, limit=100)
         if not klines:
             return None
         try:
             closes = [float(k["close"]) for k in klines]
-            if current_price is not None:
-                closes.append(current_price)
             return calculate_rsi(closes)
         except Exception:
             return None

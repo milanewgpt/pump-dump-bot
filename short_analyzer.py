@@ -66,19 +66,19 @@ def _score_ath(ath_x: float) -> tuple[str, str, float]:
         return "Новый ATH — сверху нет сопротивления, риск сильного пролёта вверх", "❌", -1.0
     if ath_x < 2.0:
         return "У самого ATH — сопротивления сверху почти нет", "⚠️", -0.5
-    return f"До ATH {int(ath_x)}x — сверху есть сопротивление", "✅", 1.0
+    return f"До ATH {int(ath_x)}x — далеко, не влияет", "▫️", 0.0
 
 
 def _score_funding(funding: Optional[float]) -> tuple[Optional[str], Optional[str], float]:
     """Positive funding = longs paying shorts = good for short entry.
-    Strongly negative funding = shorts dominant = squeeze risk = block entry.
-    Returns (label, icon, score) or (None, None, 0) when funding unavailable.
+    Only strongly positive (≥0.05%) or strongly negative (<-1%) affect score.
+    Normal range (0–0.05%) is neutral — doesn't indicate meaningful long positioning.
     """
     if funding is None:
         return None, None, 0.0
     pct = funding * 100
-    if pct >= 0:
-        return f"Фандинг {pct:.4f}% — положительный, перевес лонгов (хорошо для шорта)", "✅", 1.0
+    if pct >= 0.05:
+        return f"Фандинг {pct:.4f}% — высокий, явный перевес лонгов (хорошо для шорта)", "✅", 1.0
     if pct < -1.0:
         return f"Фандинг {pct:.4f}% — сильно отрицательный, перевес шортов (риск сквиза вверх)", "❌", -1.0
     return f"Фандинг {pct:.4f}% — нейтральный, не влияет", "▫️", 0.0
