@@ -209,6 +209,26 @@ class SignalTracker:
             logger.info(f"State loaded: {len(self._stop_times)} symbols with stops, "
                         f"{len(self._active)} active positions (state age {age/60:.0f} min)")
         except FileNotFoundError:
-            logger.info("No saved state found — starting fresh")
+            seed = os.environ.get("SEED_STATE")
+            if seed:
+                try:
+                    os.environ.pop("SEED_STATE", None)
+                    state = json.loads(seed)
+                    # re-enter with the seeded state dict
+                    now = time.time()
+                    cutoff = now - _STOP_WINDOW_S
+                    for sym, ts in state.get("stop_times", {}).items():
+                        valid = [t for t in ts if t > cutoff]
+                        if valid:
+                            self._stop_times[sym] = valid
+                    for sym, end in state.get("cooldown_end", {}).items():
+                        if end > now:
+                            self._stop_cooldown_end[sym] = end
+                    self.save_state()
+                    logger.info(f"State seeded from SEED_STATE env var: {len(self._stop_times)} symbols")
+                except Exception as e:
+                    logger.warning(f"SEED_STATE parse failed: {e}")
+            else:
+                logger.info("No saved state found — starting fresh")
         except Exception as e:
             logger.warning(f"State load failed: {e}")
