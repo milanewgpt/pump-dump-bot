@@ -123,7 +123,8 @@ def _score_level(
 
     diff_pct = (current - price_60min_ago) / price_60min_ago × 100:
     - > 10%: fresh pump above 60-min level → reversal likely ✅
-    - 0–10%: moderate move, not decisive ▫️
+    - 5–10%: moderate move, not decisive ▫️
+    - 0–5%: barely moved in 1h → not a fresh pump ❌ (hard block)
     - < 0%: price lower than 60 min ago → bounce/recovery, not a fresh pump ❌ (hard block)
     """
     if not price_60min_ago or price_60min_ago <= 0:
@@ -134,10 +135,15 @@ def _score_level(
             f"Свежий памп (+{diff_pct:.1f}% за 1ч) — разворот вероятен",
             "✅", 1.0,
         )
+    if diff_pct >= 5.0:
+        return (
+            f"60 мин назад цена была на {diff_pct:.1f}% ниже — умеренно, не влияет",
+            "▫️", 0.0,
+        )
     if diff_pct >= 0.0:
         return (
-            f"60 мин назад цена была лишь на {diff_pct:.1f}% ниже — умеренно, не влияет",
-            "▫️", 0.0,
+            f"Памп не свежий — за 1ч рост всего +{diff_pct:.1f}%, цена не ушла от уровня",
+            "❌", -1.0,
         )
     return (
         f"Возврат к уровню — 60 мин назад цена была выше (на {abs(diff_pct):.1f}%)",
@@ -277,12 +283,15 @@ def format_short_analysis(
     # Hard block: arbitrage pump = spread ≥5%, not real momentum
     arb_block = arb_spread_pct is not None and arb_spread_pct >= 5.0
 
-    # Hard block: price lower than 60 min ago = bounce/recovery, not fresh pump
+    # Hard block: 60-min delta < 5% = price barely moved = not a fresh pump
     level_block = (
         price_60min_ago is not None
         and price_60min_ago > 0
-        and current_price < price_60min_ago
+        and (current_price - price_60min_ago) / price_60min_ago * 100 < 5.0
     )
+
+    # Hard block: 2+ stops in 24h on this coin = persistent uptrend, not reversing
+    hard_stop_block = stops_today >= 2
 
     # Hard block: ≥6 signals today on this coin = overheated, like competitor
     signal_block = signal_per_day >= 6
@@ -305,8 +314,14 @@ def format_short_analysis(
     elif rsi_block:
         v_emoji, v_label = "🔴", "ПРОПУСК — RSI экстремально низкий, памп без перегрева"
     elif level_block:
-        lvl_diff = abs((current_price - price_60min_ago) / price_60min_ago * 100)
-        v_emoji, v_label = "🔴", f"ПРОПУСК — возврат к уровню, 60 мин назад цена была выше на {lvl_diff:.1f}%"
+        diff_pct_val = (current_price - price_60min_ago) / price_60min_ago * 100
+        if diff_pct_val < 0:
+            lvl_diff = abs(diff_pct_val)
+            v_emoji, v_label = "🔴", f"ПРОПУСК — возврат к уровню, 60 мин назад цена была выше на {lvl_diff:.1f}%"
+        else:
+            v_emoji, v_label = "🔴", f"ПРОПУСК — памп не свежий, за 1ч рост всего +{diff_pct_val:.1f}%"
+    elif hard_stop_block:
+        v_emoji, v_label = "🔴", f"ПРОПУСК — {stops_today} стопа за 24ч, монета в устойчивом тренде"
     elif signal_block:
         v_emoji, v_label = "🔴", f"ПРОПУСК — {signal_per_day}-й сигнал по монете за день, перегрета"
     elif cooldown_block:
@@ -324,7 +339,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or signal_block or cooldown_block
+    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or hard_stop_block or signal_block or cooldown_block
     has_real_entry = not hard_block and total >= 2.0
     if has_real_entry:
         sl = current_price * 1.03

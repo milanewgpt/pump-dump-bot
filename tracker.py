@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
+_STOP_WINDOW_S = 24 * 3600  # rolling window for stop counter
+
 
 @dataclass
 class ActivePosition:
@@ -24,8 +26,7 @@ class SignalTracker:
         self._date: date = date.today()
         # Position tracking
         self._active: dict[str, ActivePosition] = {}
-        self._stops_today: dict[str, int] = defaultdict(int)
-        self._stops_date: date = date.today()
+        self._stop_times: dict[str, list[float]] = defaultdict(list)  # rolling 24h timestamps
         self._stop_cooldown_end: dict[str, float] = {}  # symbol → timestamp when 1h cooldown expires
 
     def _maybe_reset(self):
@@ -33,12 +34,6 @@ class SignalTracker:
         if today != self._date:
             self._daily.clear()
             self._date = today
-
-    def _maybe_reset_stops(self):
-        today = date.today()
-        if today != self._stops_date:
-            self._stops_today.clear()
-            self._stops_date = today
 
     # ---- dedup + counter ----
 
@@ -121,13 +116,16 @@ class SignalTracker:
         return results
 
     def _record_stop(self, symbol: str):
-        self._maybe_reset_stops()
-        self._stops_today[symbol] += 1
-        self._stop_cooldown_end[symbol] = time.time() + 3600  # 1h cooldown after SL
+        now = time.time()
+        self._stop_times[symbol].append(now)
+        cutoff = now - _STOP_WINDOW_S
+        self._stop_times[symbol] = [t for t in self._stop_times[symbol] if t > cutoff]
+        self._stop_cooldown_end[symbol] = now + 3600  # 1h cooldown after SL
 
     def get_stops_today(self, symbol: str) -> int:
-        self._maybe_reset_stops()
-        return self._stops_today[symbol]
+        """Return number of stops on this coin in the last 24h (rolling window)."""
+        cutoff = time.time() - _STOP_WINDOW_S
+        return sum(1 for t in self._stop_times[symbol] if t > cutoff)
 
     def get_stop_cooldown_mins(self, symbol: str) -> int:
         """Returns minutes remaining in cooldown after SL. 0 = no cooldown."""
