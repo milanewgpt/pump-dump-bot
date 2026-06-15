@@ -76,6 +76,7 @@ class PumpScanner:
         connector = aiohttp.TCPConnector(limit=50)
         async with aiohttp.ClientSession(connector=connector) as session:
             self.api = BingXAPI(session)
+            self.tracker.load_state()
             await self._warmup_history()
             while True:
                 try:
