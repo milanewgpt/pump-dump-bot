@@ -160,6 +160,8 @@ class PumpScanner:
 
             pct = (last_price - ref_price) / ref_price * 100
             if pct < self.min_pump_pct:
+                if pct >= 7.0:
+                    logger.info(f"📊 Near-miss {sym}: +{pct:.1f}% (ref={ref_price:.6g}, last={last_price:.6g}, need {self.min_pump_pct}%)")
                 continue
 
             # Dedup: suppress same symbol for SIGNAL_COOLDOWN_MS after last signal
