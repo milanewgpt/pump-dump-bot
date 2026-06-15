@@ -204,7 +204,7 @@ class PumpScanner:
         vol_24h: float = 0.0,
         price_60min_ago: Optional[float] = None,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, oi_usd, binance_price = (
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, resistance_1h_info, oi_usd, binance_price = (
             await asyncio.gather(
                 self._get_rsi(symbol, "1h"),
                 self._get_rsi(symbol, "4h"),
@@ -213,7 +213,8 @@ class PumpScanner:
                 self._get_ath_x(symbol, close_p),
                 self._get_vol_multiplier(symbol),
                 self._get_btc_6h_change(),
-                self._find_resistance(symbol, close_p),
+                self._find_resistance(symbol, close_p, "4h"),
+                self._find_resistance(symbol, close_p, "1h"),
                 self._get_oi_usd(symbol, close_p),
                 self._get_binance_price(symbol),
                 return_exceptions=True,
@@ -228,6 +229,7 @@ class PumpScanner:
         vol_mult = vol_mult if isinstance(vol_mult, float) else None
         btc_6h = btc_6h if isinstance(btc_6h, float) else None
         resistance_info = resistance_info if isinstance(resistance_info, tuple) else None
+        resistance_1h_info = resistance_1h_info if isinstance(resistance_1h_info, tuple) else None
         oi_usd = oi_usd if isinstance(oi_usd, float) else None
         binance_price = binance_price if isinstance(binance_price, float) else None
 
@@ -267,6 +269,7 @@ class PumpScanner:
             signal_per_day=daily_count,
             price_60min_ago=price_60min_ago,
             resistance_info=resistance_info,
+            resistance_1h_info=resistance_1h_info,
             stops_today=stops_today,
             arb_spread_pct=arb_spread_pct,
             stop_cooldown_mins=stop_cooldown_mins,
@@ -284,14 +287,19 @@ class PumpScanner:
     # ------------------------------------------------------------------ #
 
     async def _find_resistance(
-        self, symbol: str, current_price: float
+        self, symbol: str, current_price: float, interval: str = "4h"
     ) -> Optional[tuple[float, float, float]]:
         """Find nearest strong resistance level above current price within 10%.
 
-        Uses 4h klines (300 candles ≈ 50 days). Returns (level, pct_above, drop_pct) or None.
+        Returns (level, pct_above, drop_pct) or None.
         Only returns levels with historical drop ≥ 20% (strong resistance).
         """
-        klines = await self.api.get_klines(symbol, "4h", limit=300)
+        if interval == "1h":
+            limit, window, look_ahead_max = 300, 5, 48
+        else:  # 4h
+            limit, window, look_ahead_max = 300, 3, 20
+
+        klines = await self.api.get_klines(symbol, interval, limit=limit)
         if not klines or current_price <= 0:
             return None
         try:
@@ -305,7 +313,6 @@ class PumpScanner:
             return None
 
         candidates: list[tuple[float, float, float]] = []
-        window = 3
 
         for i in range(window, n - window - 1):
             local_high = highs[i]
@@ -316,7 +323,7 @@ class PumpScanner:
             pct_above = (local_high - current_price) / current_price * 100
             if pct_above > 10.0:
                 continue
-            look_ahead = min(20, n - i - 1)
+            look_ahead = min(look_ahead_max, n - i - 1)
             if look_ahead < 3:
                 continue
             min_close_after = min(closes[i + 1 : i + 1 + look_ahead])

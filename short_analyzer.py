@@ -152,7 +152,7 @@ def _score_level(
 
 
 def _score_resistance(
-    resistance_info: Optional[tuple],
+    resistance_info: Optional[tuple], label: str = "4h"
 ) -> tuple[Optional[str], Optional[str], float]:
     """Strong historical resistance within 10% above entry with ≥20% historical drop."""
     if resistance_info is None:
@@ -160,11 +160,11 @@ def _score_resistance(
     level, pct_above, drop_pct = resistance_info
     if drop_pct >= 20.0:
         return (
-            f"Сильное сопр. {_fmt_price(level)} (+{pct_above:.1f}%, истор. обвал −{drop_pct:.0f}%) — мощный уровень для фейда",
+            f"Сопр. {label}: {_fmt_price(level)} (+{pct_above:.1f}%, обвал −{drop_pct:.0f}%) — мощный уровень",
             "✅", 1.0,
         )
     return (
-        f"Сопр. {_fmt_price(level)} (+{pct_above:.1f}%, истор. обвал −{drop_pct:.0f}%) — слабый уровень",
+        f"Сопр. {label}: {_fmt_price(level)} (+{pct_above:.1f}%, обвал −{drop_pct:.0f}%) — слабый уровень",
         "▫️", 0.0,
     )
 
@@ -200,6 +200,7 @@ def format_short_analysis(
     signal_per_day: int = 1,
     price_60min_ago: Optional[float] = None,
     resistance_info: Optional[tuple] = None,
+    resistance_1h_info: Optional[tuple] = None,
     stops_today: int = 0,
     arb_spread_pct: Optional[float] = None,
     stop_cooldown_mins: int = 0,
@@ -251,11 +252,21 @@ def format_short_analysis(
         criteria.append((lvl_icon, lvl_label))
         total += lvl_score
 
-    # Historical resistance
-    res_label, res_icon, res_score = _score_resistance(resistance_info)
+    # Historical resistance (4h scores, 1h informational — skip if same level as 4h)
+    res_label, res_icon, res_score = _score_resistance(resistance_info, "4h")
     if res_icon:
         criteria.append((res_icon, res_label))
         total += res_score
+
+    res_1h_label, res_1h_icon, _ = _score_resistance(resistance_1h_info, "1h")
+    if res_1h_icon:
+        same_level = (
+            resistance_info is not None
+            and resistance_1h_info is not None
+            and abs(resistance_info[0] - resistance_1h_info[0]) / resistance_info[0] < 0.005
+        )
+        if not same_level:
+            criteria.append((res_1h_icon, res_1h_label))
 
     # Repeat pump counter
     rep_label, rep_icon, rep_score = _score_repeat(signal_per_day)
