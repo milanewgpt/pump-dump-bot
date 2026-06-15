@@ -313,8 +313,8 @@ def format_short_analysis(
     # Hard block: 1h cooldown after SL on this coin
     cooldown_block = stop_cooldown_mins > 0
 
-    # Hard block: OI < $100K = futures not liquid enough to trade
-    oi_block = 0 < oi_usd < 100_000
+    # OI is informational only — low OI doesn't mean contract is untradeable on BingX
+    oi_block = False
 
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
