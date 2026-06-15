@@ -76,12 +76,57 @@ class PumpScanner:
         connector = aiohttp.TCPConnector(limit=50)
         async with aiohttp.ClientSession(connector=connector) as session:
             self.api = BingXAPI(session)
+            await self._warmup_history()
             while True:
                 try:
                     await self._scan()
                 except Exception as e:
                     logger.error(f"Scan cycle error: {e}", exc_info=True)
                 await asyncio.sleep(self.scan_interval)
+
+    async def _warmup_history(self):
+        """Pre-populate price history from 1m klines so cold start window = 0."""
+        logger.info("Warming up price history from 1m klines…")
+        tickers = await self.api.get_all_tickers()
+        if not tickers:
+            logger.warning("Warmup: ticker empty, skipping")
+            return
+
+        # Only warm up symbols with enough volume (same filter as scan)
+        symbols = [
+            t["symbol"] for t in tickers
+            if float(t.get("quoteVolume", 0)) >= self.min_volume_usdt
+            and float(t.get("lastPrice", 0)) >= 0.001
+        ]
+        logger.info(f"Warmup: fetching 1m klines for {len(symbols)} symbols…")
+
+        # Batch to avoid rate limits (15 at a time, 1s delay)
+        BATCH = 15
+        loaded = 0
+        for i in range(0, len(symbols), BATCH):
+            batch = symbols[i:i + BATCH]
+            results = await asyncio.gather(
+                *[self.api.get_klines(sym, "1m", limit=70) for sym in batch],
+                return_exceptions=True,
+            )
+            for sym, klines in zip(batch, results):
+                if isinstance(klines, Exception) or not klines:
+                    continue
+                if sym not in self._price_history:
+                    self._price_history[sym] = deque()
+                hist = self._price_history[sym]
+                for k in klines:
+                    try:
+                        ts = int(k["time"])
+                        px = float(k["close"])
+                        hist.append((ts, px))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                loaded += 1
+            if i + BATCH < len(symbols):
+                await asyncio.sleep(1.0)
+
+        logger.info(f"Warmup complete: {loaded}/{len(symbols)} symbols pre-loaded")
 
     # ------------------------------------------------------------------ #
     #  Scan cycle  (1 ticker request + lazy klines refreshes)
