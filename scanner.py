@@ -163,7 +163,10 @@ class PumpScanner:
                 continue
 
             # Dedup: suppress same symbol for SIGNAL_COOLDOWN_MS after last signal
-            if now_ms - self._last_signal_ms.get(sym, 0) < SIGNAL_COOLDOWN_MS:
+            last_sig = self._last_signal_ms.get(sym, 0)
+            if now_ms - last_sig < SIGNAL_COOLDOWN_MS:
+                remaining = int((SIGNAL_COOLDOWN_MS - (now_ms - last_sig)) / 1000)
+                logger.info(f"⏭️ {sym} +{pct:.1f}% — cooldown {remaining}s remaining")
                 continue
 
             candidates.append((sym, pct, ref_price, last_price, vol, price_60min_ago))
