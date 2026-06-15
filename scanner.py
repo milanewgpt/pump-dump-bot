@@ -237,6 +237,7 @@ class PumpScanner:
 
         daily_count = self.tracker.mark_sent(symbol, candle_time)
         stops_today = self.tracker.get_stops_today(symbol)
+        stop_cooldown_mins = self.tracker.get_stop_cooldown_mins(symbol)
 
         msg = format_pump_signal(
             symbol=symbol,
@@ -268,6 +269,7 @@ class PumpScanner:
             resistance_info=resistance_info,
             stops_today=stops_today,
             arb_spread_pct=arb_spread_pct,
+            stop_cooldown_mins=stop_cooldown_mins,
         )
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 

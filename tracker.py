@@ -26,6 +26,7 @@ class SignalTracker:
         self._active: dict[str, ActivePosition] = {}
         self._stops_today: dict[str, int] = defaultdict(int)
         self._stops_date: date = date.today()
+        self._stop_cooldown_end: dict[str, float] = {}  # symbol → timestamp when 1h cooldown expires
 
     def _maybe_reset(self):
         today = date.today()
@@ -122,7 +123,13 @@ class SignalTracker:
     def _record_stop(self, symbol: str):
         self._maybe_reset_stops()
         self._stops_today[symbol] += 1
+        self._stop_cooldown_end[symbol] = time.time() + 3600  # 1h cooldown after SL
 
     def get_stops_today(self, symbol: str) -> int:
         self._maybe_reset_stops()
         return self._stops_today[symbol]
+
+    def get_stop_cooldown_mins(self, symbol: str) -> int:
+        """Returns minutes remaining in cooldown after SL. 0 = no cooldown."""
+        remaining = self._stop_cooldown_end.get(symbol, 0) - time.time()
+        return max(0, int(remaining / 60))

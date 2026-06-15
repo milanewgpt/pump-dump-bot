@@ -196,6 +196,7 @@ def format_short_analysis(
     resistance_info: Optional[tuple] = None,
     stops_today: int = 0,
     arb_spread_pct: Optional[float] = None,
+    stop_cooldown_mins: int = 0,
 ) -> tuple[str, float, bool, bool]:
     """Returns (message, total_score, wait_mode, has_real_entry)."""
     criteria: list[tuple[str, str]] = []
@@ -286,6 +287,9 @@ def format_short_analysis(
     # Hard block: ≥6 signals today on this coin = overheated, like competitor
     signal_block = signal_per_day >= 6
 
+    # Hard block: 1h cooldown after SL on this coin
+    cooldown_block = stop_cooldown_mins > 0
+
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
         wait_line = (
@@ -305,6 +309,8 @@ def format_short_analysis(
         v_emoji, v_label = "🔴", f"ПРОПУСК — возврат к уровню, 60 мин назад цена была выше на {lvl_diff:.1f}%"
     elif signal_block:
         v_emoji, v_label = "🔴", f"ПРОПУСК — {signal_per_day}-й сигнал по монете за день, перегрета"
+    elif cooldown_block:
+        v_emoji, v_label = "🔴", f"ПРОПУСК — кулдаун 1ч после стопа, осталось ~{stop_cooldown_mins} мин"
     else:
         v_emoji, v_label = _verdict(total)
 
@@ -318,7 +324,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or signal_block
+    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or signal_block or cooldown_block
     has_real_entry = not hard_block and total >= 2.0
     if has_real_entry:
         sl = current_price * 1.03
