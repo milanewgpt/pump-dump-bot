@@ -31,11 +31,13 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
     if rsi is None:
         return "RSI 1H н/д", "▫️", 0.0
     r = round(rsi)
-    if r >= 40:
+    if r >= 70:
         return f"RSI 1H {r} — перекуплен, откат вероятен", "✅", 1.0
     if r < 20:
         return f"RSI 1H {r} — экстремально низкий, жёсткий блок", "🚫", -1.0
-    return f"RSI 1H {r} — низкий, памп без перегрева", "❌", -1.0
+    if r < 40:
+        return f"RSI 1H {r} — низкий, памп без перегрева", "❌", -1.0
+    return f"RSI 1H {r} — умеренный, не влияет", "▫️", 0.0
 
 
 def _score_vol(mult: Optional[float]) -> tuple[str, str, float]:
@@ -204,6 +206,7 @@ def format_short_analysis(
     stops_today: int = 0,
     arb_spread_pct: Optional[float] = None,
     stop_cooldown_mins: int = 0,
+    oi_usd: float = 0,
 ) -> tuple[str, float, bool, bool]:
     """Returns (message, total_score, wait_mode, has_real_entry)."""
     criteria: list[tuple[str, str]] = []
@@ -310,6 +313,9 @@ def format_short_analysis(
     # Hard block: 1h cooldown after SL on this coin
     cooldown_block = stop_cooldown_mins > 0
 
+    # Hard block: OI < $100K = futures not liquid enough to trade
+    oi_block = 0 < oi_usd < 100_000
+
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
         wait_line = (
@@ -337,6 +343,9 @@ def format_short_analysis(
         v_emoji, v_label = "🔴", f"ПРОПУСК — {signal_per_day}-й сигнал по монете за день, перегрета"
     elif cooldown_block:
         v_emoji, v_label = "🔴", f"ПРОПУСК — кулдаун 1ч после стопа, осталось ~{stop_cooldown_mins} мин"
+    elif oi_block:
+        oi_m = oi_usd / 1_000_000
+        v_emoji, v_label = "🔴", f"ПРОПУСК — OI ${oi_m:.1f}M, нет ликвидности для фьючерсов"
     else:
         v_emoji, v_label = _verdict(total)
 
@@ -350,7 +359,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or hard_stop_block or signal_block or cooldown_block
+    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or hard_stop_block or signal_block or cooldown_block or oi_block
     has_real_entry = not hard_block and total >= 2.0
     if has_real_entry:
         sl = current_price * 1.03

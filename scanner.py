@@ -273,6 +273,7 @@ class PumpScanner:
             stops_today=stops_today,
             arb_spread_pct=arb_spread_pct,
             stop_cooldown_mins=stop_cooldown_mins,
+            oi_usd=oi_usd or 0,
         )
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
