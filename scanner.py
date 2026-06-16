@@ -257,7 +257,7 @@ class PumpScanner:
     ):
         rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, resistance_1h_info, oi_usd, binance_price = (
             await asyncio.gather(
-                self._get_rsi(symbol, "1h"),
+                self._get_rsi(symbol, "1h", current_price=close_p),
                 self._get_rsi(symbol, "4h"),
                 self._get_rsi(symbol, "1d"),
                 self.api.get_funding_rate(symbol),
@@ -451,29 +451,43 @@ class PumpScanner:
         except Exception:
             return None
 
-    async def _get_rsi(self, symbol: str, interval: str) -> Optional[float]:
-        """RSI on completed candles only (no current open candle)."""
+    async def _get_rsi(self, symbol: str, interval: str, current_price: Optional[float] = None) -> Optional[float]:
+        """RSI. For 1h: pass current_price to include the live pump in the calculation."""
         klines = await self.api.get_klines(symbol, interval, limit=100)
         if not klines:
             return None
         try:
             closes = [float(k["close"]) for k in klines]
+            if current_price is not None:
+                closes.append(current_price)
             return calculate_rsi(closes)
         except Exception:
             return None
 
     async def _get_binance_price(self, symbol: str) -> Optional[float]:
-        """Fetch last price from Binance futures for arb-pump detection."""
+        """Fetch price from Binance futures; falls back to Gate.io spot for tokens not on Binance."""
         coin = symbol.replace("-USDT", "").replace("-USDC", "")
+
         url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={coin}USDT"
         try:
-            async with self.api.session.get(
-                url, timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
+            async with self.api.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 data = await resp.json()
-                return float(data["price"])
+                if isinstance(data, dict) and "price" in data:
+                    return float(data["price"])
         except Exception:
-            return None
+            pass
+
+        # Gate.io spot fallback (catches tokens absent from Binance futures, e.g. H-USDT)
+        gate_url = f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={coin}_USDT"
+        try:
+            async with self.api.session.get(gate_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                if isinstance(data, list) and data:
+                    return float(data[0]["last"])
+        except Exception:
+            pass
+
+        return None
 
     async def _get_ath_x(self, symbol: str, current_price: float) -> float:
         klines = await self.api.get_klines(symbol, "1d", limit=1440)

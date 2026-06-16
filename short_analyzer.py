@@ -43,11 +43,7 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
 def _score_vol(mult: Optional[float]) -> tuple[str, str, float]:
     if mult is None:
         return "Объём н/д", "▫️", 0.0
-    if mult < 3.0:
-        return f"Объём {mult:.2f}x — низкий, импульс без поддержки", "✅", 1.0
-    if mult < 5.0:
-        return f"Объём {mult:.2f}x — умеренный, не влияет", "▫️", 0.0
-    return f"Объём {mult:.2f}x — высокий, повышенный риск", "❌", -1.0
+    return f"Объём {mult:.2f}x — справочно", "▫️", 0.0
 
 
 def _score_btc(pct: Optional[float]) -> tuple[str, str, float]:
