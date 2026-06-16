@@ -289,8 +289,7 @@ class PumpScanner:
             arb_spread_pct = (binance_price - close_p) / close_p * 100
 
         daily_count = self.tracker.mark_sent(symbol, candle_time)
-        stops_today = self.tracker.get_stops_today(symbol)
-        stop_cooldown_mins = self.tracker.get_stop_cooldown_mins(symbol)
+        stops_today, stop_cooldown_mins = await self._get_executor_cooldown(symbol)
 
         msg = format_pump_signal(
             symbol=symbol,
@@ -503,6 +502,23 @@ class PumpScanner:
                 f"✅ ТЕЙК (−5%) — откат отработал"
             )
         return ""  # timeout — no message
+
+    async def _get_executor_cooldown(self, symbol: str) -> tuple[int, int]:
+        """Query bingx-executor for real SL count and cooldown. Falls back to local tracker."""
+        if _TRADE_WEBHOOK_URL:
+            base = _TRADE_WEBHOOK_URL.rsplit("/", 1)[0]
+            url = f"{base}/cooldown/{symbol}"
+            headers = {"X-Secret": _TRADE_WEBHOOK_SECRET} if _TRADE_WEBHOOK_SECRET else {}
+            try:
+                async with self.api.session.get(
+                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("stops_24h", 0), data.get("cooldown_mins", 0)
+            except Exception as e:
+                logger.debug(f"Executor cooldown query failed for {symbol}: {e}")
+        return self.tracker.get_stops_today(symbol), self.tracker.get_stop_cooldown_mins(symbol)
 
     async def _fire_trade_webhook(self, symbol: str, price: float):
         payload = {"symbol": symbol, "price": price}
