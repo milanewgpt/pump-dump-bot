@@ -222,12 +222,8 @@ class PumpScanner:
         if skipped_vol:
             logger.debug(f"Skipped {skipped_vol} low-volume symbols (<{self.min_volume_usdt:,.0f} USDT)")
 
-        # Check active positions against current prices and send results
-        position_results = self.tracker.check_positions(prices)
-        for result in position_results:
-            msg = self._format_result(result)
-            if msg:
-                await self._send_telegram(msg)
+        # Check active positions against current prices — stats tracked internally, no Telegram message
+        self.tracker.check_positions(prices)
 
         # Fire signals
         sent = 0

@@ -35,6 +35,7 @@ class SignalTracker:
         # Position tracking
         self._active: dict[str, ActivePosition] = {}
         self._stop_times: dict[str, list[float]] = defaultdict(list)  # rolling 24h timestamps
+        self._tp_times: dict[str, list[float]] = defaultdict(list)    # rolling 24h timestamps for TP
         self._stop_cooldown_end: dict[str, float] = {}  # symbol → timestamp when 1h cooldown expires
 
     def _maybe_reset(self):
@@ -118,6 +119,8 @@ class SignalTracker:
                 to_close.append(sym)
                 if outcome == "stop" and pos.is_real:
                     self._record_stop(sym)
+                elif outcome == "take" and pos.is_real:
+                    self._record_tp(sym)
 
         for sym in to_close:
             del self._active[sym]
@@ -135,15 +138,38 @@ class SignalTracker:
         self._stop_cooldown_end[symbol] = now + 3600  # 1h cooldown after SL
         self.save_state()
 
+    def _record_tp(self, symbol: str):
+        now = time.time()
+        self._tp_times[symbol].append(now)
+        cutoff = now - _STOP_WINDOW_S
+        self._tp_times[symbol] = [t for t in self._tp_times[symbol] if t > cutoff]
+        self.save_state()
+
     def get_stops_today(self, symbol: str) -> int:
         """Return number of stops on this coin in the last 24h (rolling window)."""
         cutoff = time.time() - _STOP_WINDOW_S
         return sum(1 for t in self._stop_times[symbol] if t > cutoff)
 
+    def get_tps_today(self, symbol: str) -> int:
+        """Return number of TP hits on this coin in the last 24h (rolling window)."""
+        cutoff = time.time() - _STOP_WINDOW_S
+        return sum(1 for t in self._tp_times[symbol] if t > cutoff)
+
     def get_stop_cooldown_mins(self, symbol: str) -> int:
         """Returns minutes remaining in cooldown after SL. 0 = no cooldown."""
         remaining = self._stop_cooldown_end.get(symbol, 0) - time.time()
         return max(0, int(remaining / 60))
+
+    def get_total_stats(self) -> dict:
+        """Return total SL/TP counts across all symbols in last 24h."""
+        cutoff = time.time() - _STOP_WINDOW_S
+        total_sl = sum(
+            sum(1 for t in ts if t > cutoff) for ts in self._stop_times.values()
+        )
+        total_tp = sum(
+            sum(1 for t in ts if t > cutoff) for ts in self._tp_times.values()
+        )
+        return {"sl_24h": total_sl, "tp_24h": total_tp}
 
     # ---- persistence ----
 
@@ -157,6 +183,11 @@ class SignalTracker:
                 "stop_times": {
                     sym: [t for t in ts if t > cutoff]
                     for sym, ts in self._stop_times.items()
+                    if any(t > cutoff for t in ts)
+                },
+                "tp_times": {
+                    sym: [t for t in ts if t > cutoff]
+                    for sym, ts in self._tp_times.items()
                     if any(t > cutoff for t in ts)
                 },
                 "cooldown_end": {
@@ -192,6 +223,10 @@ class SignalTracker:
                 valid = [t for t in ts if t > cutoff]
                 if valid:
                     self._stop_times[sym] = valid
+            for sym, ts in state.get("tp_times", {}).items():
+                valid = [t for t in ts if t > cutoff]
+                if valid:
+                    self._tp_times[sym] = valid
             for sym, end in state.get("cooldown_end", {}).items():
                 if end > now:
                     self._stop_cooldown_end[sym] = end
