@@ -34,9 +34,9 @@ def _ath_line(ath_x: float, current_price: float) -> str:
         ath_x=27   → More than 26x to ATH
     """
     if ath_x <= 1.01:
-        return "🚀 New ATH!"
+        return "New ATH!"
     n = int(ath_x) - 1
-    return f"⚠️ More than {n}x to ATH"
+    return f"More than {n}x to ATH"
 
 
 def format_pump_signal(
@@ -64,18 +64,18 @@ def format_pump_signal(
     if oi_usd is not None and oi_usd > 0:
         oi_m = oi_usd / 1_000_000
         if vol_24h > 0:
-            oi_line = f"📈 OI: ${oi_m:.1f}M (×{oi_usd / vol_24h:.1f} к объёму)\n"
+            oi_line = f"OI: ${oi_m:.1f}M (×{oi_usd / vol_24h:.1f} к объёму)\n"
         else:
-            oi_line = f"📈 OI: ${oi_m:.1f}M\n"
+            oi_line = f"OI: ${oi_m:.1f}M\n"
 
     return (
-        f"🔵 <a href='{bingx_url}'>BingX</a> -30- "
+        f"<a href='{bingx_url}'>BingX</a> -30- "
         f"<a href='{cg_url}'>{symbol}</a> - "
         f"<a href='{tv_url}'>TV</a>\n"
-        f"🟢 Pump: {pct:.2f}% ({_fmt_price(open_price)} - {_fmt_price(close_price)})\n"
-        f"📊 RSI: 1H {_fmt_rsi(rsi_1h)} / 4H {_fmt_rsi(rsi_4h)} / 1D {_fmt_rsi(rsi_1d)}\n"
-        f"⚙️ Funding: {_fmt_funding(funding)}   💧 Объём 24ч: ${vol_24h / 1_000_000:.1f}M\n"
+        f"Pump: {pct:.2f}% ({_fmt_price(open_price)} - {_fmt_price(close_price)})\n"
+        f"RSI: 1H {_fmt_rsi(rsi_1h)} / 4H {_fmt_rsi(rsi_4h)} / 1D {_fmt_rsi(rsi_1d)}\n"
+        f"Funding: {_fmt_funding(funding)}   💧 Объём 24ч: ${vol_24h / 1_000_000:.1f}M\n"
         f"{oi_line}"
-        f"🔈 Signal per day: {signal_per_day}\n"
+        f"Signal per day: {signal_per_day}\n"
         f"{ath_line}"
     )

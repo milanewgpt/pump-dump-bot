@@ -346,8 +346,8 @@ def format_short_analysis(
         v_emoji, v_label = _verdict(total)
 
     msg_lines = [
-        f"📌 {coin}/USDT · шорт после пампа +{pct:.2f}%",
-        f"💰 Цена {_fmt_price(current_price)}",
+        f"{coin}/USDT · шорт после пампа +{pct:.2f}%",
+        f"Цена {_fmt_price(current_price)}",
         "",
         f"{v_emoji} {v_label}",
         "",
