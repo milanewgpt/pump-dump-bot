@@ -373,7 +373,12 @@ def format_short_analysis(
             "🕒 Дождитесь начисления фандинга и перепроверьте сигнал",
         ])
 
-    # hard blocks: полный пропуск — не мониторим (effective < 1.0)
-    # cooldown / слабый / wait: мониторим статистику, но is_real=False
+    if has_real_entry:
+        verdict = "entry"
+    elif hard_block:
+        verdict = "skip"
+    else:
+        verdict = "weak"
+
     effective_total = min(total, 0.9) if hard_block else total
-    return "\n".join(msg_lines), effective_total, wait_mode, has_real_entry
+    return "\n".join(msg_lines), effective_total, wait_mode, has_real_entry, verdict

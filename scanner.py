@@ -302,7 +302,7 @@ class PumpScanner:
             oi_usd=oi_usd,
         )
 
-        short_msg, total, wait_mode, has_real_entry = format_short_analysis(
+        short_msg, total, wait_mode, has_real_entry, verdict = format_short_analysis(
             symbol=symbol,
             pct=pct,
             current_price=close_p,
@@ -323,8 +323,8 @@ class PumpScanner:
         )
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
-        if not wait_mode and total >= 1.0:
-            self.tracker.register_position(symbol, close_p, candle_time, is_real=has_real_entry)
+        if not wait_mode:
+            self.tracker.register_position(symbol, close_p, candle_time, verdict=verdict)
 
         if has_real_entry and _TRADE_WEBHOOK_URL:
             asyncio.create_task(self._fire_trade_webhook(symbol, close_p))

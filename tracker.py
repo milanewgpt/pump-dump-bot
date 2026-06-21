@@ -24,7 +24,11 @@ class ActivePosition:
     tp_price: float
     candle_time: int
     signal_time: float = field(default_factory=time.time)
-    is_real: bool = True  # False = статистический мониторинг без реального входа
+    verdict: str = "entry"  # "entry" | "weak" | "skip"
+
+    @property
+    def is_real(self) -> bool:
+        return self.verdict == "entry"
 
 
 class SignalTracker:
@@ -34,12 +38,14 @@ class SignalTracker:
         self._date: date = date.today()
         # Position tracking
         self._active: dict[str, ActivePosition] = {}
-        # Cooldown: real trades only (is_real=True)
+        # Cooldown: real trades only (entry verdict)
         self._stop_times: dict[str, list[float]] = defaultdict(list)
         self._stop_cooldown_end: dict[str, float] = {}
-        # Stats: all signals (real + non-real)
+        # Rolling 24h stats: all signals
         self._all_stop_times: dict[str, list[float]] = defaultdict(list)
         self._all_tp_times: dict[str, list[float]] = defaultdict(list)
+        # All-time accumulated counters by verdict (persisted)
+        self._acc: dict[str, int] = {"entry_tp": 0, "entry_sl": 0, "weak_tp": 0, "weak_sl": 0, "skip_tp": 0, "skip_sl": 0}
 
     def _maybe_reset(self):
         today = date.today()
@@ -68,18 +74,22 @@ class SignalTracker:
 
     # ---- position tracking ----
 
-    def register_position(self, symbol: str, entry_price: float, candle_time: int, is_real: bool = True):
+    def register_position(self, symbol: str, entry_price: float, candle_time: int,
+                          verdict: str = "entry", is_real: bool = True):
         """Register a short position for result tracking (SL +3%, TP -5%).
 
-        is_real=False: monitor price for stats only, no actual trade registered.
+        verdict: "entry" (real trade) | "weak" (monitored, no trade) | "skip" (blocked signal)
+        is_real kept for backward compat; verdict takes priority if provided.
         """
+        if verdict not in ("entry", "weak", "skip"):
+            verdict = "entry" if is_real else "weak"
         self._active[symbol] = ActivePosition(
             symbol=symbol,
             entry_price=entry_price,
             sl_price=entry_price * 1.03,
             tp_price=entry_price * 0.95,
             candle_time=candle_time,
-            is_real=is_real,
+            verdict=verdict,
         )
         self.save_state()
 
@@ -121,9 +131,9 @@ class SignalTracker:
                 })
                 to_close.append(sym)
                 if outcome == "stop":
-                    self._record_stop(sym, cooldown=pos.is_real)
+                    self._record_stop(sym, verdict=pos.verdict)
                 elif outcome == "take":
-                    self._record_tp(sym)
+                    self._record_tp(sym, verdict=pos.verdict)
 
         for sym in to_close:
             del self._active[sym]
@@ -133,24 +143,28 @@ class SignalTracker:
 
         return results
 
-    def _record_stop(self, symbol: str, cooldown: bool = True):
+    def _record_stop(self, symbol: str, verdict: str = "entry"):
         now = time.time()
         cutoff = now - _STOP_WINDOW_S
-        # All signals → stats
         self._all_stop_times[symbol].append(now)
         self._all_stop_times[symbol] = [t for t in self._all_stop_times[symbol] if t > cutoff]
-        # Real trades only → cooldown
-        if cooldown:
+        if verdict == "entry":
             self._stop_times[symbol].append(now)
             self._stop_times[symbol] = [t for t in self._stop_times[symbol] if t > cutoff]
             self._stop_cooldown_end[symbol] = now + 3600
+        key = f"{verdict}_sl"
+        if key in self._acc:
+            self._acc[key] += 1
         self.save_state()
 
-    def _record_tp(self, symbol: str):
+    def _record_tp(self, symbol: str, verdict: str = "entry"):
         now = time.time()
         cutoff = now - _STOP_WINDOW_S
         self._all_tp_times[symbol].append(now)
         self._all_tp_times[symbol] = [t for t in self._all_tp_times[symbol] if t > cutoff]
+        key = f"{verdict}_tp"
+        if key in self._acc:
+            self._acc[key] += 1
         self.save_state()
 
     def get_stops_today(self, symbol: str) -> int:
@@ -172,6 +186,19 @@ class SignalTracker:
         """Returns minutes remaining in cooldown after SL. 0 = no cooldown."""
         remaining = self._stop_cooldown_end.get(symbol, 0) - time.time()
         return max(0, int(remaining / 60))
+
+    def get_verdict_stats(self) -> dict:
+        """All-time accumulated SL/TP counts by verdict category."""
+        def wr(tp: int, sl: int) -> float:
+            total = tp + sl
+            return round(tp / total * 100, 1) if total else 0.0
+
+        result = {}
+        for v in ("entry", "weak", "skip"):
+            tp = self._acc.get(f"{v}_tp", 0)
+            sl = self._acc.get(f"{v}_sl", 0)
+            result[v] = {"tp": tp, "sl": sl, "total": tp + sl, "winrate": wr(tp, sl)}
+        return result
 
     def get_total_stats(self) -> dict:
         """Total SL/TP counts across all symbols in last 24h (all signals)."""
@@ -219,10 +246,11 @@ class SignalTracker:
                         "tp_price": pos.tp_price,
                         "candle_time": pos.candle_time,
                         "signal_time": pos.signal_time,
-                        "is_real": pos.is_real,
+                        "verdict": pos.verdict,
                     }
                     for sym, pos in self._active.items()
                 },
+                "acc": self._acc,
                 "saved_at": now,
             }
             with open(_STATE_PATH, "w") as f:
@@ -253,6 +281,8 @@ class SignalTracker:
                 if end > now:
                     self._stop_cooldown_end[sym] = end
             for sym, p in state.get("active_positions", {}).items():
+                # backward compat: old state has is_real, new has verdict
+                verdict = p.get("verdict") or ("entry" if p.get("is_real", True) else "weak")
                 self._active[sym] = ActivePosition(
                     symbol=sym,
                     entry_price=p["entry_price"],
@@ -260,8 +290,11 @@ class SignalTracker:
                     tp_price=p["tp_price"],
                     candle_time=p["candle_time"],
                     signal_time=p["signal_time"],
-                    is_real=p.get("is_real", True),
+                    verdict=verdict,
                 )
+            saved_acc = state.get("acc", {})
+            for k in self._acc:
+                self._acc[k] = saved_acc.get(k, 0)
             age = now - state.get("saved_at", now)
             logger.info(f"State loaded: {len(self._stop_times)} symbols with stops, "
                         f"{len(self._active)} active positions (state age {age/60:.0f} min)")
