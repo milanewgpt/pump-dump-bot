@@ -32,6 +32,15 @@ ROLL_LOOKBACK_60_MS = 60 * 60 * 1000  # for "return to level" check: price 60 mi
 SIGNAL_COOLDOWN_MS = 25 * 60 * 1000  # suppress re-signal for same symbol for 25 min
 CANDLE_PERIOD_MS  = 30 * 60 * 1000   # still used for vol-multiplier and tracker
 
+# Resistance-approach scanner
+RESISTANCE_SCAN_INTERVAL  = 180          # run every 3 minutes
+RESISTANCE_COOLDOWN_MS    = 4 * 60 * 60 * 1000  # 4h cooldown per symbol
+RESISTANCE_MOVE_MIN_PCT   = 2.0          # minimum 30-min upward move to qualify
+RESISTANCE_MAX_ABOVE_PCT  = 7.0          # resistance must be within 7% above price
+RESISTANCE_RSI_MIN        = 45           # RSI floor (too cold below)
+RESISTANCE_RSI_MAX        = 78           # RSI ceiling (above = pump scanner range)
+RESISTANCE_SCAN_BATCH     = 15           # max candidates per cycle
+
 
 def current_candle_ts() -> int:
     """Return the open timestamp (ms) of the current 30m candle."""
@@ -63,10 +72,22 @@ class PumpScanner:
         self._last_ticker_syms: set[str] = set()
         # symbols currently absent from bulk ticker (fetched individually every cycle)
         self._absent_syms: set[str] = set()
+        # Latest 24h quote volume per symbol (updated every scan cycle)
+        self._last_vol: dict[str, float] = {}
+        # Timestamp (ms) of last resistance-approach signal per symbol
+        self._last_resistance_signal_ms: dict[str, int] = {}
 
     # ------------------------------------------------------------------ #
     #  Main loop
     # ------------------------------------------------------------------ #
+
+    async def _pump_scan_loop(self):
+        while True:
+            try:
+                await self._scan()
+            except Exception as e:
+                logger.error(f"Pump scan error: {e}", exc_info=True)
+            await asyncio.sleep(self.scan_interval)
 
     async def run(self):
         logger.info(
@@ -78,12 +99,7 @@ class PumpScanner:
             self.api = BingXAPI(session)
             self.tracker.load_state()
             await self._warmup_history()
-            while True:
-                try:
-                    await self._scan()
-                except Exception as e:
-                    logger.error(f"Scan cycle error: {e}", exc_info=True)
-                await asyncio.sleep(self.scan_interval)
+            await asyncio.gather(self._pump_scan_loop(), self._resistance_scan_loop())
 
     async def _warmup_history(self):
         """Pre-populate price history from 1m klines so cold start window = 0."""
@@ -174,6 +190,7 @@ class PumpScanner:
                 continue
 
             prices[sym] = last_price
+            self._last_vol[sym] = vol  # keep for resistance-approach scan
 
             if vol < self.min_volume_usdt:
                 skipped_vol += 1
@@ -543,6 +560,159 @@ class PumpScanner:
                         logger.warning(f"Trade webhook {symbol}: status {resp.status}")
         except Exception as e:
             logger.warning(f"Trade webhook {symbol}: {e}")
+
+    # ------------------------------------------------------------------ #
+    #  Resistance-approach scanner
+    # ------------------------------------------------------------------ #
+
+    async def _resistance_scan_loop(self):
+        await asyncio.sleep(90)  # let price history warm up before first check
+        while True:
+            try:
+                await self._resistance_approach_scan()
+            except Exception as e:
+                logger.error(f"Resistance scan error: {e}", exc_info=True)
+            await asyncio.sleep(RESISTANCE_SCAN_INTERVAL)
+
+    async def _resistance_approach_scan(self):
+        """Find coins trending up 2–9% in 30 min and within 7% below strong resistance."""
+        now_ms = int(time.time() * 1000)
+        ref_ts_30 = now_ms - 30 * 60 * 1000
+
+        candidates: list[tuple[str, float, float]] = []
+        for sym, hist in self._price_history.items():
+            if len(hist) < 5:
+                continue
+            if self._last_vol.get(sym, 0) < self.min_volume_usdt:
+                continue
+            if now_ms - self._last_resistance_signal_ms.get(sym, 0) < RESISTANCE_COOLDOWN_MS:
+                continue
+            if now_ms - self._last_signal_ms.get(sym, 0) < SIGNAL_COOLDOWN_MS:
+                continue
+
+            current_price = hist[-1][1]
+            ref_price: Optional[float] = None
+            for ts, px in hist:
+                if ts <= ref_ts_30:
+                    ref_price = px
+
+            if ref_price is None or ref_price <= 0:
+                continue
+            move_30m = (current_price - ref_price) / ref_price * 100
+            if not (RESISTANCE_MOVE_MIN_PCT <= move_30m < self.min_pump_pct):
+                continue
+
+            candidates.append((sym, current_price, move_30m))
+
+        if not candidates:
+            return
+
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        candidates = candidates[:RESISTANCE_SCAN_BATCH]
+        logger.info(f"Resistance scan: {len(candidates)} candidates")
+
+        results = await asyncio.gather(
+            *[self._evaluate_resistance_candidate(sym, price, move)
+              for sym, price, move in candidates],
+            return_exceptions=True,
+        )
+
+        candle_time = current_candle_ts()
+        for res in results:
+            if isinstance(res, Exception):
+                logger.debug(f"Resistance candidate error: {res}")
+                continue
+            if res is None:
+                continue
+            sym, price, move, resistance, rsi = res
+            self._last_resistance_signal_ms[sym] = now_ms
+            self._last_signal_ms[sym] = now_ms
+            await self._send_resistance_signal(sym, price, move, resistance, rsi, candle_time)
+
+    async def _evaluate_resistance_candidate(
+        self, sym: str, current_price: float, move_30m: float
+    ) -> Optional[tuple]:
+        """Returns (sym, price, move, resistance, rsi) or None if not a valid candidate."""
+        resistance, rsi = await asyncio.gather(
+            self._find_resistance(sym, current_price, "4h"),
+            self._get_rsi(sym, "1h", current_price=current_price),
+            return_exceptions=True,
+        )
+        if isinstance(resistance, Exception) or resistance is None:
+            return None
+        if isinstance(rsi, Exception) or rsi is None:
+            return None
+        _, pct_above, _ = resistance
+        if pct_above > RESISTANCE_MAX_ABOVE_PCT:
+            return None
+        if not (RESISTANCE_RSI_MIN <= rsi <= RESISTANCE_RSI_MAX):
+            return None
+        return sym, current_price, move_30m, resistance, rsi
+
+    async def _send_resistance_signal(
+        self,
+        sym: str,
+        current_price: float,
+        move_30m: float,
+        resistance: tuple,
+        rsi_1h: float,
+        candle_time: int,
+    ):
+        vol_24h = self._last_vol.get(sym, 0)
+        coin = sym.replace("-USDT", "").replace("-USDC", "")
+
+        funding, ath_x, btc_6h, resistance_1h, oi_usd, binance_price = await asyncio.gather(
+            self.api.get_funding_rate(sym),
+            self._get_ath_x(sym, current_price),
+            self._get_btc_6h_change(),
+            self._find_resistance(sym, current_price, "1h"),
+            self._get_oi_usd(sym, current_price),
+            self._get_binance_price(sym),
+            return_exceptions=True,
+        )
+        funding = funding if isinstance(funding, float) else None
+        ath_x = ath_x if isinstance(ath_x, float) else 0.0
+        btc_6h = btc_6h if isinstance(btc_6h, float) else None
+        resistance_1h = resistance_1h if isinstance(resistance_1h, tuple) else None
+        oi_usd = oi_usd if isinstance(oi_usd, float) else None
+        binance_price = binance_price if isinstance(binance_price, float) else None
+
+        arb_spread_pct: Optional[float] = None
+        if binance_price and current_price > 0:
+            arb_spread_pct = (binance_price - current_price) / current_price * 100
+
+        daily_count = self.tracker.mark_sent(sym, candle_time)
+        stops_today, stop_cooldown_mins = await self._get_executor_cooldown(sym)
+
+        level, pct_above, _ = resistance
+        from short_analyzer import format_short_analysis as _fsa
+        short_msg, total, wait_mode, has_real_entry, verdict = _fsa(
+            symbol=sym,
+            pct=move_30m,
+            current_price=current_price,
+            rsi_1h=rsi_1h,
+            vol_multiplier=None,
+            vol_24h=vol_24h,
+            btc_6h_pct=btc_6h,
+            ath_x=ath_x,
+            funding=funding,
+            signal_per_day=daily_count,
+            price_60min_ago=None,  # bypass 60-min level check — not a post-pump signal
+            resistance_info=resistance,
+            resistance_1h_info=resistance_1h,
+            stops_today=stops_today,
+            arb_spread_pct=arb_spread_pct,
+            stop_cooldown_mins=stop_cooldown_mins,
+            oi_usd=oi_usd or 0,
+            title_override=f"📍 {coin}/USDT · подход к сопр. +{move_30m:.1f}%/30м",
+        )
+
+        await self._send_telegram(short_msg)
+
+        if not wait_mode:
+            self.tracker.register_position(sym, current_price, candle_time, verdict=verdict)
+        if has_real_entry and _TRADE_WEBHOOK_URL:
+            asyncio.create_task(self._fire_trade_webhook(sym, current_price))
 
     async def _send_telegram(self, text: str):
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"

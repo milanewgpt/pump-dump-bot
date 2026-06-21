@@ -206,6 +206,7 @@ def format_short_analysis(
     arb_spread_pct: Optional[float] = None,
     stop_cooldown_mins: int = 0,
     oi_usd: float = 0,
+    title_override: Optional[str] = None,
 ) -> tuple[str, float, bool, bool]:
     """Returns (message, total_score, wait_mode, has_real_entry)."""
     criteria: list[tuple[str, str]] = []
@@ -352,7 +353,7 @@ def format_short_analysis(
         v_emoji, v_label = _verdict(total, has_resistance)
 
     msg_lines = [
-        f"{coin}/USDT · шорт после пампа +{pct:.2f}%",
+        title_override or f"{coin}/USDT · шорт после пампа +{pct:.2f}%",
         f"Цена {_fmt_price(current_price)}",
         "",
         f"{v_emoji} {v_label}",
