@@ -176,10 +176,13 @@ def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[s
     return None, None, 0.0
 
 
-def _verdict(score: float) -> tuple[str, str]:
-    if score >= 2.0:
+def _verdict(score: float, has_resistance: bool = True) -> tuple[str, str]:
+    threshold = 2.0 if has_resistance else 3.0
+    if score >= threshold:
         return "🟢", "ВХОД — сильный сигнал"
     if score >= 1.0:
+        if not has_resistance and score >= 2.0:
+            return "🟡", "СЛАБЫЙ — нет ближнего сопротивления для входа"
         return "🟡", "СЛАБЫЙ СИГНАЛ — лучше пропустить"
     return "🔴", "ПРОПУСК — не заходим"
 
@@ -279,6 +282,9 @@ def format_short_analysis(
         criteria.append((arb_icon, arb_label))
         total += arb_score
 
+    # Resistance check for ВХОД threshold
+    has_resistance = resistance_info is not None or resistance_1h_info is not None
+
     # Wait mode: large negative funding about to be charged
     fund_pct = funding * 100 if funding is not None else 0.0
     mins = _minutes_to_next_funding()
@@ -343,7 +349,7 @@ def format_short_analysis(
         oi_m = oi_usd / 1_000_000
         v_emoji, v_label = "🔴", f"ПРОПУСК — OI ${oi_m:.1f}M, нет ликвидности для фьючерсов"
     else:
-        v_emoji, v_label = _verdict(total)
+        v_emoji, v_label = _verdict(total, has_resistance)
 
     msg_lines = [
         f"{coin}/USDT · шорт после пампа +{pct:.2f}%",
@@ -356,7 +362,8 @@ def format_short_analysis(
         msg_lines.append(f"{icon} {label}")
 
     hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or hard_stop_block or signal_block or cooldown_block or oi_block
-    has_real_entry = not hard_block and total >= 2.0
+    vход_threshold = 2.0 if has_resistance else 3.0
+    has_real_entry = not hard_block and total >= vход_threshold
     if has_real_entry:
         sl = current_price * 1.03
         tp = current_price * 0.95
