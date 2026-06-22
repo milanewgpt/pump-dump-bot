@@ -36,7 +36,7 @@ CANDLE_PERIOD_MS  = 30 * 60 * 1000   # still used for vol-multiplier and tracker
 RESISTANCE_SCAN_INTERVAL  = 180          # run every 3 minutes
 RESISTANCE_COOLDOWN_MS    = 4 * 60 * 60 * 1000  # 4h cooldown per symbol
 RESISTANCE_MOVE_MIN_PCT   = 2.0          # minimum 30-min upward move to qualify
-RESISTANCE_MAX_ABOVE_PCT  = 7.0          # resistance must be within 7% above price
+RESISTANCE_MAX_ABOVE_PCT  = 12.0         # resistance must be within 12% above price
 RESISTANCE_RSI_MIN        = 45           # RSI floor (too cold below)
 RESISTANCE_RSI_MAX        = 78           # RSI ceiling (above = pump scanner range)
 RESISTANCE_SCAN_BATCH     = 15           # max candidates per cycle
@@ -192,19 +192,21 @@ class PumpScanner:
             prices[sym] = last_price
             self._last_vol[sym] = vol  # keep for resistance-approach scan
 
-            if vol < self.min_volume_usdt:
-                skipped_vol += 1
-                continue
             if last_price < 0.001:
                 continue
 
-            # Update rolling price history
+            # Update rolling price history for ALL symbols — even low-volume ones.
+            # This ensures we catch volume spikes on previously quiet coins (e.g. IDOL, TAIKO).
             if sym not in self._price_history:
                 self._price_history[sym] = deque()
             hist = self._price_history[sym]
             hist.append((now_ms, last_price))
             while hist and hist[0][0] < now_ms - ROLL_MAX_AGE_MS:
                 hist.popleft()
+
+            if vol < self.min_volume_usdt:
+                skipped_vol += 1
+                continue
 
             # Find reference price from ~30 min ago (most recent entry at or before ref_ts)
             # Also find price from ~60 min ago for "return to level" check
@@ -385,10 +387,12 @@ class PumpScanner:
             if local_high <= current_price:
                 continue
             pct_above = (local_high - current_price) / current_price * 100
-            if pct_above > 10.0:
+            if pct_above > 14.0:
                 continue
             look_ahead = min(look_ahead_max, n - i - 1)
-            if look_ahead < 3:
+            # Close levels (≤5%) may be recent highs with short look-ahead — allow 1 candle
+            min_look_ahead = 1 if pct_above <= 5.0 else 3
+            if look_ahead < min_look_ahead:
                 continue
             min_close_after = min(closes[i + 1 : i + 1 + look_ahead])
             drop_pct = (local_high - min_close_after) / local_high * 100
@@ -397,7 +401,9 @@ class PumpScanner:
         if not candidates:
             return None
 
-        strong = [(lv, pa, dp) for lv, pa, dp in candidates if dp >= 20.0]
+        # Close levels (≤5%): accept 10% historical drop — recent formation, less time to drop fully
+        # Far levels (>5%): require 20% drop for proven strong resistance
+        strong = [(lv, pa, dp) for lv, pa, dp in candidates if dp >= (10.0 if pa <= 5.0 else 20.0)]
         if strong:
             return min(strong, key=lambda x: x[1])
         return None
