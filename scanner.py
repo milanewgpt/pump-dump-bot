@@ -35,9 +35,9 @@ CANDLE_PERIOD_MS  = 30 * 60 * 1000   # still used for vol-multiplier and tracker
 # Resistance-approach scanner
 RESISTANCE_SCAN_INTERVAL  = 180          # run every 3 minutes
 RESISTANCE_COOLDOWN_MS    = 4 * 60 * 60 * 1000  # 4h cooldown per symbol
-RESISTANCE_MOVE_MIN_PCT   = 2.0          # minimum 30-min upward move to qualify
+RESISTANCE_MOVE_MIN_PCT   = 4.0          # minimum 30-min upward move to qualify (was 2.0 — too much noise)
 RESISTANCE_MAX_ABOVE_PCT  = 12.0         # resistance must be within 12% above price
-RESISTANCE_RSI_MIN        = 45           # RSI floor (too cold below)
+RESISTANCE_RSI_MIN        = 62           # RSI floor — only perky coins (was 45)
 RESISTANCE_RSI_MAX        = 78           # RSI ceiling (above = pump scanner range)
 RESISTANCE_SCAN_BATCH     = 15           # max candidates per cycle
 
@@ -326,6 +326,7 @@ class PumpScanner:
             pct=pct,
             current_price=close_p,
             rsi_1h=rsi_1h,
+            rsi_4h=rsi_4h,
             vol_multiplier=vol_mult,
             vol_24h=vol_24h,
             btc_6h_pct=btc_6h,
@@ -340,6 +341,10 @@ class PumpScanner:
             stop_cooldown_mins=stop_cooldown_mins,
             oi_usd=oi_usd or 0,
         )
+        if verdict == "skip" and not wait_mode:
+            logger.info(f"📋 {symbol} → ПРОПУСК (score={total:.1f}), не отправляем")
+            self.tracker.register_position(symbol, close_p, candle_time, verdict=verdict)
+            return
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
         if not wait_mode:
@@ -667,13 +672,14 @@ class PumpScanner:
         vol_24h = self._last_vol.get(sym, 0)
         coin = sym.replace("-USDT", "").replace("-USDC", "")
 
-        funding, ath_x, btc_6h, resistance_1h, oi_usd, binance_price = await asyncio.gather(
+        funding, ath_x, btc_6h, resistance_1h, oi_usd, binance_price, rsi_4h = await asyncio.gather(
             self.api.get_funding_rate(sym),
             self._get_ath_x(sym, current_price),
             self._get_btc_6h_change(),
             self._find_resistance(sym, current_price, "1h"),
             self._get_oi_usd(sym, current_price),
             self._get_binance_price(sym),
+            self._get_rsi(sym, "4h"),
             return_exceptions=True,
         )
         funding = funding if isinstance(funding, float) else None
@@ -682,6 +688,7 @@ class PumpScanner:
         resistance_1h = resistance_1h if isinstance(resistance_1h, tuple) else None
         oi_usd = oi_usd if isinstance(oi_usd, float) else None
         binance_price = binance_price if isinstance(binance_price, float) else None
+        rsi_4h = rsi_4h if isinstance(rsi_4h, float) else None
 
         arb_spread_pct: Optional[float] = None
         if binance_price and current_price > 0:
@@ -697,6 +704,7 @@ class PumpScanner:
             pct=move_30m,
             current_price=current_price,
             rsi_1h=rsi_1h,
+            rsi_4h=rsi_4h,
             vol_multiplier=None,
             vol_24h=vol_24h,
             btc_6h_pct=btc_6h,
@@ -712,6 +720,10 @@ class PumpScanner:
             oi_usd=oi_usd or 0,
             title_override=f"📍 {coin}/USDT · подход к сопр. +{move_30m:.1f}%/30м",
         )
+
+        if verdict == "skip":
+            logger.info(f"📋 {sym} (resistance) → ПРОПУСК (score={total:.1f}), не отправляем")
+            return
 
         await self._send_telegram(short_msg)
 

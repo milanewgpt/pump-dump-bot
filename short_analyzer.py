@@ -40,6 +40,17 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
     return f"RSI 1H {r} — умеренный, не влияет", "▫️", 0.0
 
 
+def _score_rsi_4h(rsi_4h: Optional[float]) -> tuple[str, str, float]:
+    if rsi_4h is None:
+        return "", "▫️", 0.0
+    r = round(rsi_4h)
+    if r >= 60:
+        return f"RSI 4H {r} — подтверждает перекупленность", "✅", 0.5
+    if r < 35:
+        return f"RSI 4H {r} — слабость на 4H, риск продолжения", "⚠️", -0.5
+    return "", "▫️", 0.0
+
+
 def _score_vol(mult: Optional[float]) -> tuple[str, str, float]:
     if mult is None:
         return "Объём н/д", "▫️", 0.0
@@ -193,6 +204,7 @@ def format_short_analysis(
     pct: float,
     current_price: float,
     rsi_1h: Optional[float],
+    rsi_4h: Optional[float] = None,
     vol_multiplier: Optional[float],
     vol_24h: float,
     btc_6h_pct: Optional[float],
@@ -222,6 +234,11 @@ def format_short_analysis(
     label, icon, score = _score_rsi(rsi_1h)
     criteria.append((icon, label))
     total += score
+
+    rsi4h_label, rsi4h_icon, rsi4h_score = _score_rsi_4h(rsi_4h)
+    if rsi4h_label:
+        criteria.append((rsi4h_icon, rsi4h_label))
+    total += rsi4h_score
 
     label, icon, score = _score_vol(vol_multiplier)
     criteria.append((icon, label))
@@ -257,6 +274,11 @@ def format_short_analysis(
 
     # Historical resistance (4h scores, 1h informational — skip if same level as 4h)
     res_label, res_icon, res_score = _score_resistance(resistance_info, "4h")
+    # Very close resistance (<2%) is a stronger signal — price hits the wall immediately
+    if resistance_info is not None and res_score > 0:
+        _, pct_above_4h, _ = resistance_info
+        if pct_above_4h < 2.0:
+            res_score = 1.5
     if res_icon:
         criteria.append((res_icon, res_label))
         total += res_score
