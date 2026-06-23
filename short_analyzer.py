@@ -405,10 +405,10 @@ def format_short_analysis(
 
     if has_real_entry:
         verdict = "entry"
-    elif hard_block:
+    elif hard_block or total < 1.0:
         verdict = "skip"
     else:
-        verdict = "weak"
+        verdict = "weak"  # score 1.0 to threshold = СЛАБЫЙ
 
     effective_total = min(total, 0.9) if hard_block else total
     return "\n".join(msg_lines), effective_total, wait_mode, has_real_entry, verdict
