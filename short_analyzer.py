@@ -74,7 +74,9 @@ def _score_ath(ath_x: float) -> tuple[str, str, float]:
     if ath_x < 1.05:
         return "Новый ATH — выше ценовой истории, осторожно", "⚠️", -0.5
     if ath_x < 2.0:
-        return "У самого ATH — сопротивления сверху почти нет", "⚠️", -0.5
+        # Near ATH = overhead supply (buyers at ATH sitting at breakeven, will sell)
+        # That IS a resistance concept — no penalty, just inform
+        return "У самого ATH — overhead supply, цена возвращалась сюда", "▫️", 0.0
     return f"До ATH {int(ath_x)}x — далеко, не влияет", "▫️", 0.0
 
 
@@ -307,7 +309,9 @@ def format_short_analysis(
         total += arb_score
 
     # Resistance check for ВХОД threshold
-    has_resistance = resistance_info is not None or resistance_1h_info is not None
+    # Near ATH (1.05–2x) counts as resistance: overhead supply from prior buyers
+    ath_is_resistance = 0 < ath_x < 2.0
+    has_resistance = resistance_info is not None or resistance_1h_info is not None or ath_is_resistance
 
     # Wait mode: large negative funding about to be charged
     fund_pct = funding * 100 if funding is not None else 0.0

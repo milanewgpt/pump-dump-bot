@@ -273,7 +273,7 @@ class PumpScanner:
         rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, resistance_1h_info, oi_usd, binance_price = (
             await asyncio.gather(
                 self._get_rsi(symbol, "1h", current_price=close_p),
-                self._get_rsi(symbol, "4h"),
+                self._get_rsi(symbol, "4h", current_price=close_p),
                 self._get_rsi(symbol, "1d"),
                 self.api.get_funding_rate(symbol),
                 self._get_ath_x(symbol, close_p),
@@ -679,7 +679,7 @@ class PumpScanner:
             self._find_resistance(sym, current_price, "1h"),
             self._get_oi_usd(sym, current_price),
             self._get_binance_price(sym),
-            self._get_rsi(sym, "4h"),
+            self._get_rsi(sym, "4h", current_price=current_price),
             return_exceptions=True,
         )
         funding = funding if isinstance(funding, float) else None
