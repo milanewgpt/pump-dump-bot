@@ -283,7 +283,7 @@ def format_short_analysis(
         criteria.append((res_icon, res_label))
         total += res_score
 
-    res_1h_label, res_1h_icon, _ = _score_resistance(resistance_1h_info, "1h")
+    res_1h_label, res_1h_icon, res_1h_score = _score_resistance(resistance_1h_info, "1h")
     if res_1h_icon:
         same_level = (
             resistance_info is not None
@@ -292,6 +292,7 @@ def format_short_analysis(
         )
         if not same_level:
             criteria.append((res_1h_icon, res_1h_label))
+            total += res_1h_score * 0.5  # 1h resistance counts at half weight vs 4h
 
     # Repeat pump counter
     rep_label, rep_icon, rep_score = _score_repeat(signal_per_day)
@@ -332,8 +333,8 @@ def format_short_analysis(
     # Hard block: 2+ stops in 24h on this coin = persistent uptrend, not reversing
     hard_stop_block = stops_today >= 2
 
-    # Hard block: ≥6 signals today on this coin = overheated, like competitor
-    signal_block = signal_per_day >= 6
+    # Hard block: ≥3 signals today on this coin = overheated, skip entirely
+    signal_block = signal_per_day >= 3
 
     # Hard block: 1h cooldown after SL on this coin
     cooldown_block = stop_cooldown_mins > 0
