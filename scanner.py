@@ -192,7 +192,7 @@ class PumpScanner:
             prices[sym] = last_price
             self._last_vol[sym] = vol  # keep for resistance-approach scan
 
-            if last_price < 0.001:
+            if last_price < 0.00001:
                 continue
 
             # Update rolling price history for ALL symbols — even low-volume ones.
@@ -270,7 +270,7 @@ class PumpScanner:
         vol_24h: float = 0.0,
         price_60min_ago: Optional[float] = None,
     ):
-        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, resistance_1h_info, oi_usd, binance_price = (
+        rsi_1h, rsi_4h, rsi_1d, funding, ath_x, vol_mult, btc_6h, resistance_info, resistance_1h_info, ema_info, oi_usd, binance_price = (
             await asyncio.gather(
                 self._get_rsi(symbol, "1h", current_price=close_p),
                 self._get_rsi(symbol, "4h", current_price=close_p),
@@ -281,6 +281,7 @@ class PumpScanner:
                 self._get_btc_6h_change(),
                 self._find_resistance(symbol, close_p, "4h"),
                 self._find_resistance(symbol, close_p, "1h"),
+                self._get_ema_resistance(symbol, close_p),
                 self._get_oi_usd(symbol, close_p),
                 self._get_binance_price(symbol),
                 return_exceptions=True,
@@ -296,6 +297,7 @@ class PumpScanner:
         btc_6h = btc_6h if isinstance(btc_6h, float) else None
         resistance_info = resistance_info if isinstance(resistance_info, tuple) else None
         resistance_1h_info = resistance_1h_info if isinstance(resistance_1h_info, tuple) else None
+        ema_info = ema_info if isinstance(ema_info, tuple) else None
         oi_usd = oi_usd if isinstance(oi_usd, float) else None
         binance_price = binance_price if isinstance(binance_price, float) else None
 
@@ -336,6 +338,7 @@ class PumpScanner:
             price_60min_ago=price_60min_ago,
             resistance_info=resistance_info,
             resistance_1h_info=resistance_1h_info,
+            ema_info=ema_info,
             stops_today=stops_today,
             arb_spread_pct=arb_spread_pct,
             stop_cooldown_mins=stop_cooldown_mins,
@@ -513,6 +516,31 @@ class PumpScanner:
 
         return None
 
+    async def _get_ema_resistance(self, symbol: str, current_price: float) -> Optional[tuple[float, float]]:
+        """Check if 50 EMA on 4H is within 15% above current price (dynamic resistance).
+
+        Returns (ema_value, pct_above) or None.
+        """
+        klines = await self.api.get_klines(symbol, "4h", limit=60)
+        if not klines or current_price <= 0:
+            return None
+        try:
+            closes = [float(k["close"]) for k in klines]
+            if len(closes) < 50:
+                return None
+            k_factor = 2 / (50 + 1)
+            ema = closes[0]
+            for c in closes[1:]:
+                ema = c * k_factor + ema * (1 - k_factor)
+            if ema <= current_price:
+                return None
+            pct_above = (ema - current_price) / current_price * 100
+            if pct_above > 15.0:
+                return None
+            return ema, pct_above
+        except Exception:
+            return None
+
     async def _get_ath_x(self, symbol: str, current_price: float) -> float:
         klines = await self.api.get_klines(symbol, "1d", limit=1440)
         if not klines or current_price == 0:
@@ -672,11 +700,12 @@ class PumpScanner:
         vol_24h = self._last_vol.get(sym, 0)
         coin = sym.replace("-USDT", "").replace("-USDC", "")
 
-        funding, ath_x, btc_6h, resistance_1h, oi_usd, binance_price, rsi_4h = await asyncio.gather(
+        funding, ath_x, btc_6h, resistance_1h, ema_info, oi_usd, binance_price, rsi_4h = await asyncio.gather(
             self.api.get_funding_rate(sym),
             self._get_ath_x(sym, current_price),
             self._get_btc_6h_change(),
             self._find_resistance(sym, current_price, "1h"),
+            self._get_ema_resistance(sym, current_price),
             self._get_oi_usd(sym, current_price),
             self._get_binance_price(sym),
             self._get_rsi(sym, "4h", current_price=current_price),
@@ -686,6 +715,7 @@ class PumpScanner:
         ath_x = ath_x if isinstance(ath_x, float) else 0.0
         btc_6h = btc_6h if isinstance(btc_6h, float) else None
         resistance_1h = resistance_1h if isinstance(resistance_1h, tuple) else None
+        ema_info = ema_info if isinstance(ema_info, tuple) else None
         oi_usd = oi_usd if isinstance(oi_usd, float) else None
         binance_price = binance_price if isinstance(binance_price, float) else None
         rsi_4h = rsi_4h if isinstance(rsi_4h, float) else None
@@ -711,9 +741,10 @@ class PumpScanner:
             ath_x=ath_x,
             funding=funding,
             signal_per_day=daily_count,
-            price_60min_ago=None,  # bypass 60-min level check — not a post-pump signal
+            price_60min_ago=None,
             resistance_info=resistance,
             resistance_1h_info=resistance_1h,
+            ema_info=ema_info,
             stops_today=stops_today,
             arb_spread_pct=arb_spread_pct,
             stop_cooldown_mins=stop_cooldown_mins,

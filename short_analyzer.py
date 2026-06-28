@@ -180,6 +180,17 @@ def _score_resistance(
     )
 
 
+def _score_ema(ema_info: Optional[tuple]) -> tuple[Optional[str], Optional[str], float]:
+    """50 EMA on 4H above current price = dynamic resistance (ключевая средняя)."""
+    if ema_info is None:
+        return None, None, 0.0
+    ema, pct_above = ema_info
+    return (
+        f"Ключевая средняя 50 EMA 4H: {_fmt_price(ema)} (+{pct_above:.1f}%) — динамическое сопр.",
+        "✅", 1.0,
+    )
+
+
 def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[str], float]:
     if stops_today >= 2:
         return (
@@ -192,11 +203,11 @@ def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[s
 def _verdict(score: float, threshold: float = 2.0) -> tuple[str, str]:
     if score >= threshold:
         return "🟢", "ВХОД — сильный сигнал"
-    if score >= 1.0:
+    if score >= 0.5:
         if threshold >= 3.0 and score >= 2.0:
             return "🟡", "СЛАБЫЙ — нет ближнего сопротивления для входа"
         return "🟡", "СЛАБЫЙ СИГНАЛ — лучше пропустить"
-    return "🔴", "ПРОПУСК — не заходим"
+    return "🟡", "СЛАБЫЙ СИГНАЛ — лучше пропустить"
 
 
 def format_short_analysis(
@@ -215,6 +226,7 @@ def format_short_analysis(
     price_60min_ago: Optional[float] = None,
     resistance_info: Optional[tuple] = None,
     resistance_1h_info: Optional[tuple] = None,
+    ema_info: Optional[tuple] = None,
     stops_today: int = 0,
     arb_spread_pct: Optional[float] = None,
     stop_cooldown_mins: int = 0,
@@ -295,7 +307,13 @@ def format_short_analysis(
             criteria.append((res_1h_icon, res_1h_label))
             total += res_1h_score * 0.5  # 1h resistance counts at half weight vs 4h
 
-    # Repeat pump counter
+    # 50 EMA on 4H as dynamic resistance (ключевая средняя)
+    ema_label, ema_icon, ema_score = _score_ema(ema_info)
+    if ema_icon:
+        criteria.append((ema_icon, ema_label))
+        total += ema_score
+
+    # Repeat pump counter — scoring penalty only, not a hard block
     rep_label, rep_icon, rep_score = _score_repeat(signal_per_day)
     if rep_icon:
         criteria.append((rep_icon, rep_label))
@@ -308,14 +326,14 @@ def format_short_analysis(
         total += arb_score
 
     # Resistance check for ВХОД threshold
-    # Real level (4h or 1h): threshold 2.0 — concrete historical rejection zone
-    # ATH overhead supply only (1.05–2x, no actual price levels): threshold 2.5 — weaker signal
-    # No resistance at all: threshold 3.0
+    # EMA + real price level: threshold 2.0
+    # ATH overhead supply only: threshold 2.5
+    # No resistance at all: threshold 2.5 (lowered from 3.0 — EMA alone can reach 2.0)
     ath_is_resistance = 0 < ath_x < 2.0
-    has_real_resistance = resistance_info is not None or resistance_1h_info is not None
+    has_real_resistance = resistance_info is not None or resistance_1h_info is not None or ema_info is not None
     has_resistance = has_real_resistance or ath_is_resistance
     entry_threshold = (
-        3.0 if not has_resistance
+        2.5 if not has_resistance
         else 2.5 if not has_real_resistance
         else 2.0
     )
@@ -325,33 +343,11 @@ def format_short_analysis(
     mins = _minutes_to_next_funding()
     wait_mode = fund_pct <= _FUNDING_WARN_PCT and mins < _FUNDING_WARN_MINUTES
 
-    # Hard block: RSI 1H < 40 = pump without overheating on 1H, continuation likely
-    rsi_block = rsi_1h is not None and round(rsi_1h) < 40
-
-    # Hard block: funding < -1% = squeeze risk
-    funding_block = funding is not None and funding * 100 < -1.0
-
     # Hard block: arbitrage pump = spread ≥5%, not real momentum
     arb_block = arb_spread_pct is not None and arb_spread_pct >= 5.0
 
-    # Hard block: 60-min delta < 5% = price barely moved = not a fresh pump
-    level_block = (
-        price_60min_ago is not None
-        and price_60min_ago > 0
-        and (current_price - price_60min_ago) / price_60min_ago * 100 < 5.0
-    )
-
-    # Hard block: 2+ stops in 24h on this coin = persistent uptrend, not reversing
-    hard_stop_block = stops_today >= 2
-
-    # Hard block: ≥3 signals today on this coin = overheated, skip entirely
-    signal_block = signal_per_day >= 3
-
     # Hard block: 1h cooldown after SL on this coin
     cooldown_block = stop_cooldown_mins > 0
-
-    # OI is informational only — low OI doesn't mean contract is untradeable on BingX
-    oi_block = False
 
     if wait_mode:
         v_emoji, v_label = "🕒", "ПОДОЖДАТЬ — скоро начисление фандинга"
@@ -363,26 +359,8 @@ def format_short_analysis(
         criteria.insert(0, wait_line)
     elif arb_block:
         v_emoji, v_label = "🔴", "ПРОПУСК — арбитражный памп, закрытие спреда с Binance"
-    elif funding_block:
-        v_emoji, v_label = "🔴", f"ПРОПУСК — отрицательный фандинг {fund_pct:.4f}%, риск сквиза"
-    elif rsi_block:
-        v_emoji, v_label = "🔴", "ПРОПУСК — RSI 1H низкий, памп без перегрева на 1H"
-    elif level_block:
-        diff_pct_val = (current_price - price_60min_ago) / price_60min_ago * 100
-        if diff_pct_val < 0:
-            lvl_diff = abs(diff_pct_val)
-            v_emoji, v_label = "🔴", f"ПРОПУСК — возврат к уровню, 60 мин назад цена была выше на {lvl_diff:.1f}%"
-        else:
-            v_emoji, v_label = "🔴", f"ПРОПУСК — памп не свежий, за 1ч рост всего +{diff_pct_val:.1f}%"
-    elif hard_stop_block:
-        v_emoji, v_label = "🔴", f"ПРОПУСК — {stops_today} стопа за 24ч, монета в устойчивом тренде"
-    elif signal_block:
-        v_emoji, v_label = "🔴", f"ПРОПУСК — {signal_per_day}-й сигнал по монете за день, перегрета"
     elif cooldown_block:
         v_emoji, v_label = "🔴", f"ПРОПУСК — кулдаун 1ч после стопа, осталось ~{stop_cooldown_mins} мин"
-    elif oi_block:
-        oi_m = oi_usd / 1_000_000
-        v_emoji, v_label = "🔴", f"ПРОПУСК — OI ${oi_m:.1f}M, нет ликвидности для фьючерсов"
     else:
         v_emoji, v_label = _verdict(total, entry_threshold)
 
@@ -396,7 +374,7 @@ def format_short_analysis(
     for icon, label in criteria:
         msg_lines.append(f"{icon} {label}")
 
-    hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or hard_stop_block or signal_block or cooldown_block or oi_block
+    hard_block = wait_mode or arb_block or cooldown_block
     has_real_entry = not hard_block and total >= entry_threshold
     if has_real_entry:
         sl = current_price * 1.03
@@ -416,10 +394,10 @@ def format_short_analysis(
 
     if has_real_entry:
         verdict = "entry"
-    elif hard_block or total < 1.0:
+    elif hard_block:
         verdict = "skip"
     else:
-        verdict = "weak"  # score 1.0 to threshold = СЛАБЫЙ
+        verdict = "weak"  # всегда СЛАБЫЙ, не пропускаем
 
     effective_total = min(total, 0.9) if hard_block else total
     return "\n".join(msg_lines), effective_total, wait_mode, has_real_entry, verdict
