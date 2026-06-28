@@ -33,10 +33,10 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
     r = round(rsi)
     if r >= 70:
         return f"RSI 1H {r} — перекуплен, откат вероятен", "✅", 1.0
-    if r < 20:
-        return f"RSI 1H {r} — экстремально низкий, жёсткий блок", "🚫", -1.0
     if r < 40:
         return f"RSI 1H {r} — низкий, памп без перегрева", "❌", -1.0
+    if r < 55:
+        return f"RSI 1H {r} — умеренный, откат не подтверждён", "⚠️", -0.5
     return f"RSI 1H {r} — умеренный, не влияет", "▫️", 0.0
 
 
@@ -189,12 +189,11 @@ def _score_stops(stops_today: int, coin: str) -> tuple[Optional[str], Optional[s
     return None, None, 0.0
 
 
-def _verdict(score: float, has_resistance: bool = True) -> tuple[str, str]:
-    threshold = 2.0 if has_resistance else 3.0
+def _verdict(score: float, threshold: float = 2.0) -> tuple[str, str]:
     if score >= threshold:
         return "🟢", "ВХОД — сильный сигнал"
     if score >= 1.0:
-        if not has_resistance and score >= 2.0:
+        if threshold >= 3.0 and score >= 2.0:
             return "🟡", "СЛАБЫЙ — нет ближнего сопротивления для входа"
         return "🟡", "СЛАБЫЙ СИГНАЛ — лучше пропустить"
     return "🔴", "ПРОПУСК — не заходим"
@@ -309,17 +308,25 @@ def format_short_analysis(
         total += arb_score
 
     # Resistance check for ВХОД threshold
-    # Near ATH (1.05–2x) counts as resistance: overhead supply from prior buyers
+    # Real level (4h or 1h): threshold 2.0 — concrete historical rejection zone
+    # ATH overhead supply only (1.05–2x, no actual price levels): threshold 2.5 — weaker signal
+    # No resistance at all: threshold 3.0
     ath_is_resistance = 0 < ath_x < 2.0
-    has_resistance = resistance_info is not None or resistance_1h_info is not None or ath_is_resistance
+    has_real_resistance = resistance_info is not None or resistance_1h_info is not None
+    has_resistance = has_real_resistance or ath_is_resistance
+    entry_threshold = (
+        3.0 if not has_resistance
+        else 2.5 if not has_real_resistance
+        else 2.0
+    )
 
     # Wait mode: large negative funding about to be charged
     fund_pct = funding * 100 if funding is not None else 0.0
     mins = _minutes_to_next_funding()
     wait_mode = fund_pct <= _FUNDING_WARN_PCT and mins < _FUNDING_WARN_MINUTES
 
-    # Hard block: RSI 1H < 20 = cold pump, continuation likely
-    rsi_block = rsi_1h is not None and round(rsi_1h) < 20
+    # Hard block: RSI 1H < 40 = pump without overheating on 1H, continuation likely
+    rsi_block = rsi_1h is not None and round(rsi_1h) < 40
 
     # Hard block: funding < -1% = squeeze risk
     funding_block = funding is not None and funding * 100 < -1.0
@@ -359,7 +366,7 @@ def format_short_analysis(
     elif funding_block:
         v_emoji, v_label = "🔴", f"ПРОПУСК — отрицательный фандинг {fund_pct:.4f}%, риск сквиза"
     elif rsi_block:
-        v_emoji, v_label = "🔴", "ПРОПУСК — RSI экстремально низкий, памп без перегрева"
+        v_emoji, v_label = "🔴", "ПРОПУСК — RSI 1H низкий, памп без перегрева на 1H"
     elif level_block:
         diff_pct_val = (current_price - price_60min_ago) / price_60min_ago * 100
         if diff_pct_val < 0:
@@ -377,7 +384,7 @@ def format_short_analysis(
         oi_m = oi_usd / 1_000_000
         v_emoji, v_label = "🔴", f"ПРОПУСК — OI ${oi_m:.1f}M, нет ликвидности для фьючерсов"
     else:
-        v_emoji, v_label = _verdict(total, has_resistance)
+        v_emoji, v_label = _verdict(total, entry_threshold)
 
     msg_lines = [
         title_override or f"{coin}/USDT · шорт после пампа +{pct:.2f}%",
@@ -390,8 +397,7 @@ def format_short_analysis(
         msg_lines.append(f"{icon} {label}")
 
     hard_block = wait_mode or arb_block or funding_block or rsi_block or level_block or hard_stop_block or signal_block or cooldown_block or oi_block
-    vход_threshold = 2.0 if has_resistance else 3.0
-    has_real_entry = not hard_block and total >= vход_threshold
+    has_real_entry = not hard_block and total >= entry_threshold
     if has_real_entry:
         sl = current_price * 1.03
         tp = current_price * 0.95
