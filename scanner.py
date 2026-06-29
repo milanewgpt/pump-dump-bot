@@ -479,14 +479,25 @@ class PumpScanner:
             return None
 
     async def _get_rsi(self, symbol: str, interval: str, current_price: Optional[float] = None) -> Optional[float]:
-        """RSI. For 1h: pass current_price to include the live pump in the calculation."""
+        """RSI. For 1h: pass current_price to include the live pump in the calculation.
+
+        If BingX already includes the current (unclosed) candle in klines, skip append
+        to avoid inflating RSI by counting the pump candle twice.
+        """
         klines = await self.api.get_klines(symbol, interval, limit=100)
         if not klines:
             return None
         try:
             closes = [float(k["close"]) for k in klines]
             if current_price is not None:
-                closes.append(current_price)
+                interval_ms = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}.get(interval, 0)
+                if interval_ms:
+                    now_period_start = (int(time.time() * 1000) // interval_ms) * interval_ms
+                    last_kline_time = int(klines[-1].get("time", 0))
+                    if last_kline_time < now_period_start:
+                        closes.append(current_price)
+                else:
+                    closes.append(current_price)
             return calculate_rsi(closes)
         except Exception:
             return None
@@ -517,7 +528,7 @@ class PumpScanner:
         return None
 
     async def _get_ema_resistance(self, symbol: str, current_price: float) -> Optional[tuple[float, float]]:
-        """Check if 50 EMA on 4H is within 15% above current price (dynamic resistance).
+        """Check if 50 EMA on 4H is within 20% above current price (dynamic resistance).
 
         Returns (ema_value, pct_above) or None.
         """
@@ -535,7 +546,7 @@ class PumpScanner:
             if ema <= current_price:
                 return None
             pct_above = (ema - current_price) / current_price * 100
-            if pct_above > 15.0:
+            if pct_above > 20.0:
                 return None
             return ema, pct_above
         except Exception:
