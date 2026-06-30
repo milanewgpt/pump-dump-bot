@@ -483,8 +483,10 @@ class PumpScanner:
 
         If BingX already includes the current (unclosed) candle in klines, skip append
         to avoid inflating RSI by counting the pump candle twice.
+        1h uses limit=50 (~2 days) for recency; 4h/1d use 100 for stability.
         """
-        klines = await self.api.get_klines(symbol, interval, limit=100)
+        limit = 50 if interval == "1h" else 100
+        klines = await self.api.get_klines(symbol, interval, limit=limit)
         if not klines:
             return None
         try:

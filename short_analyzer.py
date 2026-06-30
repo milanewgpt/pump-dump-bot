@@ -31,7 +31,7 @@ def _score_rsi(rsi: Optional[float]) -> tuple[str, str, float]:
     if rsi is None:
         return "RSI 1H н/д", "▫️", 0.0
     r = round(rsi)
-    if r >= 70:
+    if r >= 65:
         return f"RSI 1H {r} — перекуплен, откат вероятен", "✅", 1.0
     if r < 40:
         return f"RSI 1H {r} — низкий, памп без перегрева", "❌", -1.0
@@ -116,7 +116,7 @@ def _score_liquidity(vol_24h: float) -> tuple[Optional[str], Optional[str], floa
     if vol_24h <= 0 or vol_24h >= 5_000_000:
         return None, None, 0.0
     m = vol_24h / 1_000_000
-    return f"Оборот ${m:.1f}M — низкая ликвидность", "⚠️", -0.5
+    return f"Оборот ${m:.1f}M — низкая ликвидность", "⚠️", 0.0
 
 
 def _score_repeat(signal_per_day: int) -> tuple[Optional[str], Optional[str], float]:
