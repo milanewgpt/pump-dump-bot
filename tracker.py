@@ -25,6 +25,7 @@ class ActivePosition:
     candle_time: int
     signal_time: float = field(default_factory=time.time)
     verdict: str = "entry"  # "entry" | "weak" | "skip"
+    source: str = "pump"    # "pump" | "approach"
 
     @property
     def is_real(self) -> bool:
@@ -46,6 +47,8 @@ class SignalTracker:
         self._all_tp_times: dict[str, list[float]] = defaultdict(list)
         # All-time accumulated counters by verdict (persisted)
         self._acc: dict[str, int] = {"entry_tp": 0, "entry_sl": 0, "weak_tp": 0, "weak_sl": 0, "skip_tp": 0, "skip_sl": 0}
+        # Approach-only counters (entry verdict, resistance approach source)
+        self._acc_approach: dict[str, int] = {"tp": 0, "sl": 0}
 
     def _maybe_reset(self):
         today = date.today()
@@ -75,10 +78,12 @@ class SignalTracker:
     # ---- position tracking ----
 
     def register_position(self, symbol: str, entry_price: float, candle_time: int,
-                          verdict: str = "entry", is_real: bool = True):
+                          verdict: str = "entry", is_real: bool = True,
+                          source: str = "pump"):
         """Register a short position for result tracking (SL +3%, TP -5%).
 
         verdict: "entry" (real trade) | "weak" (monitored, no trade) | "skip" (blocked signal)
+        source: "pump" (pump scanner) | "approach" (resistance approach scanner)
         is_real kept for backward compat; verdict takes priority if provided.
         """
         if verdict not in ("entry", "weak", "skip"):
@@ -90,6 +95,7 @@ class SignalTracker:
             tp_price=entry_price * 0.95,
             candle_time=candle_time,
             verdict=verdict,
+            source=source,
         )
         self.save_state()
 
@@ -131,9 +137,9 @@ class SignalTracker:
                 })
                 to_close.append(sym)
                 if outcome == "stop":
-                    self._record_stop(sym, verdict=pos.verdict)
+                    self._record_stop(sym, verdict=pos.verdict, source=pos.source)
                 elif outcome == "take":
-                    self._record_tp(sym, verdict=pos.verdict)
+                    self._record_tp(sym, verdict=pos.verdict, source=pos.source)
 
         for sym in to_close:
             del self._active[sym]
@@ -143,7 +149,7 @@ class SignalTracker:
 
         return results
 
-    def _record_stop(self, symbol: str, verdict: str = "entry"):
+    def _record_stop(self, symbol: str, verdict: str = "entry", source: str = "pump"):
         now = time.time()
         cutoff = now - _STOP_WINDOW_S
         self._all_stop_times[symbol].append(now)
@@ -155,9 +161,11 @@ class SignalTracker:
         key = f"{verdict}_sl"
         if key in self._acc:
             self._acc[key] += 1
+        if source == "approach" and verdict == "entry":
+            self._acc_approach["sl"] += 1
         self.save_state()
 
-    def _record_tp(self, symbol: str, verdict: str = "entry"):
+    def _record_tp(self, symbol: str, verdict: str = "entry", source: str = "pump"):
         now = time.time()
         cutoff = now - _STOP_WINDOW_S
         self._all_tp_times[symbol].append(now)
@@ -165,6 +173,8 @@ class SignalTracker:
         key = f"{verdict}_tp"
         if key in self._acc:
             self._acc[key] += 1
+        if source == "approach" and verdict == "entry":
+            self._acc_approach["tp"] += 1
         self.save_state()
 
     def get_stops_today(self, symbol: str) -> int:
@@ -188,7 +198,7 @@ class SignalTracker:
         return max(0, int(remaining / 60))
 
     def get_verdict_stats(self) -> dict:
-        """All-time accumulated SL/TP counts by verdict category."""
+        """All-time accumulated SL/TP counts by verdict category + approach breakdown."""
         def wr(tp: int, sl: int) -> float:
             total = tp + sl
             return round(tp / total * 100, 1) if total else 0.0
@@ -198,6 +208,10 @@ class SignalTracker:
             tp = self._acc.get(f"{v}_tp", 0)
             sl = self._acc.get(f"{v}_sl", 0)
             result[v] = {"tp": tp, "sl": sl, "total": tp + sl, "winrate": wr(tp, sl)}
+
+        ap_tp = self._acc_approach.get("tp", 0)
+        ap_sl = self._acc_approach.get("sl", 0)
+        result["approach"] = {"tp": ap_tp, "sl": ap_sl, "total": ap_tp + ap_sl, "winrate": wr(ap_tp, ap_sl)}
         return result
 
     def get_total_stats(self) -> dict:
@@ -247,10 +261,12 @@ class SignalTracker:
                         "candle_time": pos.candle_time,
                         "signal_time": pos.signal_time,
                         "verdict": pos.verdict,
+                        "source": pos.source,
                     }
                     for sym, pos in self._active.items()
                 },
                 "acc": self._acc,
+                "acc_approach": self._acc_approach,
                 "saved_at": now,
             }
             with open(_STATE_PATH, "w") as f:
@@ -291,10 +307,14 @@ class SignalTracker:
                     candle_time=p["candle_time"],
                     signal_time=p["signal_time"],
                     verdict=verdict,
+                    source=p.get("source", "pump"),
                 )
             saved_acc = state.get("acc", {})
             for k in self._acc:
                 self._acc[k] = saved_acc.get(k, 0)
+            saved_approach = state.get("acc_approach", {})
+            for k in self._acc_approach:
+                self._acc_approach[k] = saved_approach.get(k, 0)
             age = now - state.get("saved_at", now)
             logger.info(f"State loaded: {len(self._stop_times)} symbols with stops, "
                         f"{len(self._active)} active positions (state age {age/60:.0f} min)")

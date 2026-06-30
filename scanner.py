@@ -346,12 +346,12 @@ class PumpScanner:
         )
         if verdict == "skip" and not wait_mode:
             logger.info(f"📋 {symbol} → ПРОПУСК (score={total:.1f}), не отправляем")
-            self.tracker.register_position(symbol, close_p, candle_time, verdict=verdict)
+            self.tracker.register_position(symbol, close_p, candle_time, verdict=verdict, source="pump")
             return
         await self._send_telegram(msg + "\n➖➖➖➖➖\n" + short_msg)
 
         if not wait_mode:
-            self.tracker.register_position(symbol, close_p, candle_time, verdict=verdict)
+            self.tracker.register_position(symbol, close_p, candle_time, verdict=verdict, source="pump")
 
         if has_real_entry and _TRADE_WEBHOOK_URL:
             asyncio.create_task(self._fire_trade_webhook(symbol, close_p))
@@ -765,15 +765,15 @@ class PumpScanner:
             title_override=f"📍 {coin}/USDT · подход к сопр. +{move_30m:.1f}%/30м",
         )
 
-        if verdict == "skip":
-            logger.info(f"📋 {sym} (resistance) → ПРОПУСК (score={total:.1f}), не отправляем")
+        if not has_real_entry:
+            logger.info(f"📋 {sym} (resistance) → {verdict} (score={total:.1f}), не отправляем")
             return
 
         await self._send_telegram(short_msg)
 
         if not wait_mode:
-            self.tracker.register_position(sym, current_price, candle_time, verdict=verdict)
-        if has_real_entry and _TRADE_WEBHOOK_URL:
+            self.tracker.register_position(sym, current_price, candle_time, verdict=verdict, source="approach")
+        if _TRADE_WEBHOOK_URL:
             asyncio.create_task(self._fire_trade_webhook(sym, current_price))
 
     async def _send_telegram(self, text: str):
