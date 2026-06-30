@@ -99,7 +99,7 @@ class PumpScanner:
             self.api = BingXAPI(session)
             self.tracker.load_state()
             await self._warmup_history()
-            await asyncio.gather(self._pump_scan_loop(), self._resistance_scan_loop())
+            await asyncio.gather(self._pump_scan_loop())
 
     async def _warmup_history(self):
         """Pre-populate price history from 1m klines so cold start window = 0."""
