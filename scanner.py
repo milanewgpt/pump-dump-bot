@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 ROLL_WINDOW_MS    = 30 * 60 * 1000   # lookback: compare current price to price 30 min ago
 ROLL_MAX_AGE_MS   = 65 * 60 * 1000   # keep price history up to 65 min (need 60-min lookback)
 ROLL_LOOKBACK_60_MS = 60 * 60 * 1000  # for "return to level" check: price 60 min ago
-SIGNAL_COOLDOWN_MS = 25 * 60 * 1000  # suppress re-signal for same symbol for 25 min
+SIGNAL_COOLDOWN_MS = 90 * 60 * 1000  # suppress re-signal for same symbol for 90 min
 CANDLE_PERIOD_MS  = 30 * 60 * 1000   # still used for vol-multiplier and tracker
 
 # Resistance-approach scanner
